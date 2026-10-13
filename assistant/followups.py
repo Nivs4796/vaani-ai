@@ -293,3 +293,27 @@ def nudge_body(row: dict, user_name: str) -> str:
     me = _first_name(user_name)
     greeting = f"Hi {first}," if first else "Hi,"
     return f"{greeting} just following up on my note{about}. {ask}\n\nThanks,\n{me}".rstrip()
+
+
+REWRITE_PROMPT = ("Rewrite this short follow-up email so it reads naturally and politely. Keep the greeting, "
+                  "the sign-off and the meaning. Do not add facts, dates, links or placeholders. "
+                  "Under 80 words. Reply with the email text only.")
+
+
+def rewrite_nudge(row: dict, template: str, user_name: str) -> str:
+    """VAANI_NUDGE_MODEL=1: the local model rewrites the template. Code checks the result and keeps
+    the template whenever the rewrite drops the person or the sign-off, adds placeholders, or runs long."""
+    from assistant import llm  # local import: the detector itself never needs the model
+
+    try:
+        resp = llm.complete([{"role": "system", "content": REWRITE_PROMPT}, {"role": "user", "content": template}], [])
+        text = str(getattr(getattr(resp, "message", None), "content", "") or "").strip()
+    except Exception:
+        return template
+    first = (str(row.get("to_name") or row.get("to_email") or "").split() or [""])[0].split("@")[0].lower()
+    sign = (str(user_name or "").split() or [""])[0].lower()
+    low = text.lower()
+    ok = (20 <= len(text) <= 700 and not re.search(r"[\[\]{}<>]", text) and "subject:" not in low
+          and (not first or first in low) and (not sign or sign in low))
+    return text if ok else template
+

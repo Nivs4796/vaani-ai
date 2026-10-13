@@ -15,6 +15,7 @@ import json
 import os
 import time
 from dataclasses import asdict
+from pathlib import Path
 
 from assistant import agent, autonomy, brief, followups, manage, memory, obs
 
@@ -97,8 +98,14 @@ def receipt(draft: dict | None) -> dict | None:
         return None
     done = draft.get("committed")
     if done:
-        return {"status": done.get("status"), "verified": bool(done.get("verified", done.get("verified_count"))),
-                "report": list(done.get("report") or []), "link": done.get("htmlLink")}
+        rec = {"status": done.get("status"), "verified": bool(done.get("verified", done.get("verified_count"))),
+               "report": list(done.get("report") or []), "link": done.get("htmlLink")}
+        plan = autonomy.undo_plan(draft)
+        if plan:
+            words = plan["action"].replace("_", " ")
+            rec["undo"] = {"draft_id": draft.get("draft_id"), "label": "Undo",
+                           "text": f"Undo puts it back: {words} {plan['count']} email(s), checked with Gmail."}
+        return rec
     created = draft.get("created")
     if draft.get("event_id") and created:
         status = created.get("status") or "CREATED"
@@ -178,12 +185,19 @@ def confirm(session: agent.Session, draft_id: str, variant: str | None = None) -
 
 def skip(session: agent.Session, draft_id: str) -> dict:
     draft = session.drafts.get(str(draft_id))
+    skipped = False
     if draft and draft.get("status") == "DRAFT":
         try:
-            autonomy.record_skip(draft)
+            skipped = autonomy.record_skip(draft) is not None
         except Exception:
             pass
-    return _out(agent.run_turn(session, None, cancel_draft_id=str(draft_id)))
+    offer = None
+    if skipped:
+        try:
+            offer = autonomy.stepback_for(draft.get("workflow") or autonomy.workflow_of(draft))
+        except Exception:
+            offer = None
+    return _out(agent.run_turn(session, None, cancel_draft_id=str(draft_id)), offer=offer)
 
 
 def _code_turn(session: agent.Session, user_line: str, make, origin: str, t0: float) -> agent.TurnResult:
@@ -210,11 +224,44 @@ def _code_turn(session: agent.Session, user_line: str, make, origin: str, t0: fl
     return agent._result(session, reply, [record], agent._zero_usage(), t0)
 
 
-def action(session: agent.Session, name: str, message_id: str | None = None, thread_id: str | None = None) -> dict:
+def _undo(session: agent.Session, draft_id: str | None, t0: float) -> dict:
+    """Receipt's Undo button: the opposite change as its own card, carried out at once through
+    the same gate (the click is the confirmation) and read back from Gmail."""
+    orig = session.drafts.get(str(draft_id or ""))
+    plan = autonomy.undo_plan(orig)
+    if plan is None:
+        return _out(agent._result(session, "There is nothing to undo on that card.", [], agent._zero_usage(), t0))
+
+    def draft_undo():
+        return manage.draft_triage(plan["action"], origin="undo", message_ids=plan["ids"])
+
+    words = plan["action"].replace("_", " ")
+    res = _code_turn(session, f"Undo that: {words} the {plan['count']} email(s).", draft_undo, "undo", t0)
+    card = res.pending_draft
+    if not card:
+        return _out(res)
+    token = obs.current_confirmer.set("undo")
+    try:
+        done = agent.run_turn(session, None, confirm_draft_id=card["draft_id"])
+    finally:
+        obs.current_confirmer.reset(token)
+    rec = receipt(session.drafts.get(card["draft_id"]))
+    if rec and rec.get("verified"):
+        orig["undone"] = True
+        autonomy.record_undo(orig)
+        brief.invalidate()
+    return _out(done, decision="undo", receipt=rec)
+
+
+def action(session: agent.Session, name: str, message_id: str | None = None, thread_id: str | None = None,
+           draft_id: str | None = None) -> dict:
     """Brief row buttons: reply (asks the model what the sender wants, setting the email in
-    focus), nudge (template follow-up in code), archive_all (triage card), dismiss."""
+    focus), nudge (template follow-up in code), archive_all (triage card), dismiss; and the
+    receipt's undo."""
     t0 = time.perf_counter()
     name = str(name or "")
+    if name == "undo":
+        return _undo(session, draft_id, t0)
     if name == "reply":
         row = _row(session, "", "id", message_id or "")
         who = ((row or {}).get("sender") or "").split()
@@ -229,6 +276,8 @@ def action(session: agent.Session, name: str, message_id: str | None = None, thr
             return _out(agent._result(session, "That thread is no longer waiting on a reply.", [], agent._zero_usage(), t0))
         me = memory.load()
         body = followups.nudge_body(row, str(me.get("name") or ""))
+        if _flag("VAANI_NUDGE_MODEL"):
+            body = followups.rewrite_nudge(row, body, str(me.get("name") or ""))
 
         def draft_nudge():
             return manage.draft_nudge(row["message_id"], body)
@@ -250,6 +299,18 @@ def action(session: agent.Session, name: str, message_id: str | None = None, thr
     return _out(agent._result(session, f"Unknown action {name!r}; nothing was done.", [], agent._zero_usage(), t0))
 
 
+EVAL_STATUS = Path(__file__).resolve().parent.parent / "data" / "eval_status.json"
+
+
+def eval_status() -> dict | None:
+    """The last `python -m evals.all` run (suites, pass counts, when), or None if it never ran."""
+    try:
+        data = json.loads(EVAL_STATUS.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) and data.get("suites") else None
+    except (OSError, ValueError):
+        return None
+
+
 def proof(workflow: str | None = None, limit: int = 20) -> dict:
     rows = autonomy.proof(limit=limit, workflow=workflow or None)
     streaks = {}
@@ -258,7 +319,7 @@ def proof(workflow: str | None = None, limit: int = 20) -> dict:
             streaks[wf] = autonomy.streak(wf)
         except Exception:
             streaks[wf] = 0
-    return {"rows": rows, "streaks": streaks}
+    return {"rows": rows, "streaks": streaks, "evals": eval_status()}
 
 
 def dumps(obj) -> str:

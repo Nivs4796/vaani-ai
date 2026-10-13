@@ -43,11 +43,19 @@ _NOUNS = {"replies": "replies", "scheduling": "scheduling", "follow_ups": "follo
 # 30 days too, but it is the one that loses mail if nobody notices, so it is never Auto.
 REVERSIBLE = frozenset({"archive", "mark_read", "label", "unarchive", "mark_unread", "unlabel", "star", "unstar"})
 NEVER_AUTO = frozenset({"trash", "untrash"})
-CONFIRMERS = ("user", "inline", "policy")
+# "undo": the Undo button on a receipt carried out the opposite change; like "policy", it is
+# no evidence for the streak either way (the undo_applied row is what ends the streak).
+CONFIRMERS = ("user", "inline", "policy", "undo")
+# The opposite mailbox change for Undo. Label changes are left out: the brief's triage cards
+# never set a label, and an unlabel needs the label name.
+INVERSE = {"archive": "unarchive", "unarchive": "archive", "mark_read": "mark_unread", "mark_unread": "mark_read",
+           "star": "unstar", "unstar": "star", "trash": "untrash", "untrash": "trash"}
+# Skipped cards in a row at One-tap or Auto before Vaani offers to step that workflow back.
+STEPBACK_SKIPS = 2
 COMMIT_TOOLS = ("commit_pending", "create_calendar_event")
 # Rows that end a streak: a skipped card, and any level change (the next offer needs
 # fresh evidence at the new level).
-RESET_TOOLS = ("skip_pending", "promotion_accept", "promotion_snooze", "level_change")
+RESET_TOOLS = ("skip_pending", "promotion_accept", "promotion_snooze", "level_change", "undo_applied")
 # Fields tag_draft() adds; tools.draft_calendar_event keeps them out of the model's result.
 DRAFT_TAGS = ("workflow", "origin", "proposed_hash", "edited", "revision_of", "drafted_turn")
 # What a card would actually do; a change to any of these after drafting is an edit.
@@ -308,8 +316,8 @@ def _streak(rows: list[dict], workflow: str, snoozed_at) -> int:
         if tool in RESET_TOOLS:
             n = 0
             continue
-        if not _is_commit_row(row) or row.get("confirmed_by") == "policy":
-            continue  # Auto's own writes prove nothing about the user's trust
+        if not _is_commit_row(row) or row.get("confirmed_by") in ("policy", "undo"):
+            continue  # Auto's own writes, and Undo's, prove nothing about the user's trust
         clean = (row.get("ok") is True and row.get("verified") is True and not row.get("edited")
                  and row.get("confirmed_by") in ("user", "inline"))
         n = n + 1 if clean else 0
@@ -452,6 +460,93 @@ def record_skip(draft: dict, user_id: str | None = None) -> dict | None:
     return obs.log_decision("skip_pending", user_id=_uid(user_id), workflow=wf, origin=draft.get("origin") or "asked",
                             card_kind=draft.get("kind") or "event_create", draft_id=draft.get("draft_id"),
                             level=level_of(wf, user_id), decision=draft.get("decision"))
+
+
+def undo_plan(draft: dict | None) -> dict | None:
+    """{action, ids, count} for the opposite change of a carried-out mailbox card, or None
+    (not a mailbox card, not carried out, already undone, itself an undo, or a label change)."""
+    if not isinstance(draft, dict) or draft.get("kind") != "email_modify" or not draft.get("committed"):
+        return None
+    if draft.get("origin") == "undo" or draft.get("undone"):
+        return None
+    inverse = INVERSE.get(str(draft.get("action") or ""))
+    ids = [str(i) for i in draft.get("ids") or [] if str(i).strip()]
+    if not inverse or not ids:
+        return None
+    return {"action": inverse, "ids": ids, "count": len(ids)}
+
+
+def record_undo(draft: dict, user_id: str | None = None) -> dict | None:
+    """The user undid a carried-out card: it was wrong, so the workflow's streak ends, and if
+    Vaani did it at Auto the workflow steps down to One-tap. Never raises."""
+    try:
+        wf = draft.get("workflow") or workflow_of(draft)
+        uid = _uid(user_id)
+        level = _prefs(uid)[wf]["level"]
+        row = obs.log_decision("undo_applied", user_id=uid, workflow=wf, card_kind=draft.get("kind"),
+                               draft_id=draft.get("draft_id"), level=level, decision=draft.get("decision"))
+        if level == "auto":
+            _set_prefs(wf, uid, level="one_tap")
+            obs.log_decision("level_change", user_id=uid, workflow=wf, from_level="auto", to_level="one_tap",
+                             level="one_tap", by="safety", reason="undone", draft_id=draft.get("draft_id"))
+        return row
+    except Exception:
+        return None
+
+
+def stepback_for(workflow: str, user_id: str | None = None) -> dict | None:
+    """After STEPBACK_SKIPS skipped cards in a row at One-tap or Auto: an offer to step the
+    workflow back one level. Vaani never lowers trust silently on skips; the user decides."""
+    wf = str(workflow or "").strip().lower()
+    if wf not in WORKFLOWS or not enabled():
+        return None
+    uid = _uid(user_id)
+    level = _prefs(uid)[wf]["level"]
+    if level not in ("one_tap", "auto"):
+        return None
+    skips = 0
+    for row in reversed(_rows(uid)):
+        if row.get("workflow") != wf:
+            continue
+        tool = row.get("tool")
+        if tool == "skip_pending":
+            skips += 1
+            if skips >= STEPBACK_SKIPS:
+                break
+            continue
+        if tool in ("level_change", "promotion_accept", "stepback_keep"):
+            break  # fresh evidence is needed after any decision about the level
+        if _is_commit_row(row) and row.get("confirmed_by") not in ("policy", "undo"):
+            break  # an approval in between: the skips were not in a row
+    if skips < STEPBACK_SKIPS:
+        return None
+    to = LEVELS[LEVELS.index(level) - 1]
+    noun = _NOUNS[wf]
+    return {"kind": "step_back", "workflow": wf, "from_level": level, "to_level": to, "skips": skips,
+            "text": f"You skipped the last {skips} {noun} cards. Step {noun} back from {LEVEL_TITLES[level]} to {LEVEL_TITLES[to]}?",
+            "accept_action": "step_back", "accept_label": f"Step back to {LEVEL_TITLES[to]}",
+            "snooze_action": "keep", "snooze_label": f"Keep {LEVEL_TITLES[level]}"}
+
+
+def accept_stepback(workflow: str, user_id: str | None = None) -> dict:
+    """Lower the workflow one level (only when a step-back offer is due). Returns its state row."""
+    wf = _check(workflow)
+    uid = _uid(user_id)
+    offer = stepback_for(wf, uid)
+    if offer is None:
+        raise ValueError(f"no step-back is due for {_NOUNS[wf]}")
+    _set_prefs(wf, uid, level=offer["to_level"])
+    obs.log_decision("level_change", user_id=uid, workflow=wf, from_level=offer["from_level"], to_level=offer["to_level"],
+                     level=offer["to_level"], by="user", reason="step_back")
+    return state_for(wf, uid)
+
+
+def keep_level(workflow: str, user_id: str | None = None) -> dict:
+    """"Keep One-tap": no step-back offer until STEPBACK_SKIPS more skips in a row."""
+    wf = _check(workflow)
+    uid = _uid(user_id)
+    obs.log_decision("stepback_keep", user_id=uid, workflow=wf, level=_prefs(uid)[wf]["level"])
+    return state_for(wf, uid)
 
 
 def on_commit_result(draft: dict, result_ok: bool, verified: bool, user_id: str | None = None) -> str | None:

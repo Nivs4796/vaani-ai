@@ -14,3 +14,4 @@ DEMO-PLAN.md
 .build/
 data/users/
 data/vaani.db*
+data/eval_status.json

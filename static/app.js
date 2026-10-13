@@ -296,12 +296,18 @@ function inlineCard(d) {
   const k = cardOf(d);
   const label = approveLabel(d, k);
   const ok = btn(label, null, k.danger ? "danger sm" : "primary sm");
+  const skip = btn("Skip", null, "ghost sm");
   const status = h("span", {class: "status", role: "status"});
   const c = h("section", {class: "card action inline live" + (k.danger ? " danger" : ""), "data-draft": d.draft_id, "aria-label": `One tap to approve: ${k.title}`},
-    chipFor(d), h("span", {class: "inline-title", title: (k.lines || []).join("\n") || null, text: k.title}), ok, status);
-  const done = finisher(c, [ok], status);
+    chipFor(d), h("span", {class: "inline-title", title: (k.lines || []).join("\n") || null, text: k.title}), ok, skip, status);
+  const done = finisher(c, [ok, skip], status);
   c._done = done;
   ok.onclick = () => { if (!busy) approveTurn(d, label, done); };
+  skip.onclick = () => {
+    if (busy) return;
+    done("Skipped · nothing was changed");
+    turn("/skip", {draft_id: d.draft_id}, "Skip", {fallback: {path: "/chat", payload: {cancel_draft_id: d.draft_id}}});
+  };
   return add(c);
 }
 
@@ -326,29 +332,42 @@ function receiptCard(rc, {auto, draft}) {
   c.append(ul);
   if (rc.htmlLink) c.append(h("p", {class: "note"}, anchor(rc.htmlLink, "Open in Google Calendar")));
   const undo = rc.undo || rc.undo_text;
-  if (undo) c.append(h("p", {class: "undo", text: typeof undo === "string" ? undo : (undo.text || undo.label || "")}));
+  if (undo && typeof undo === "object" && undo.draft_id) {
+    const b = btn(undo.label || "Undo", null, "ghost sm");
+    b.onclick = () => {
+      if (busy) return;
+      b.disabled = true;
+      doAction({action: "undo", draft_id: undo.draft_id}, "Undo that");
+    };
+    c.append(h("div", {class: "undo-row"}, b, undo.text ? h("span", {class: "note", text: undo.text}) : null));
+  } else if (undo) c.append(h("p", {class: "undo", text: typeof undo === "string" ? undo : (undo.text || undo.label || "")}));
   return add(c);
 }
 
+// A promotion ("right N times in a row, move up?") or a step-back ("skipped N in a row, move down?").
 function offerCard(o) {
+  const back = o.kind === "step_back";
+  const yes = o.accept_action || "accept", no = o.snooze_action || "snooze";
   const status = h("p", {class: "status", role: "status"});
-  const accept = btn("Accept", null, "primary");
-  const later = btn("Not now", null, "ghost");
-  const c = h("section", {class: "card offer", "aria-label": `Offer: ${wfName(o.workflow)}`},
-    h("div", {class: "card-head"}, h("span", {class: "stamp accent-ink"}, "Offer"), chipFor({workflow: o.workflow, level: o.from_level})),
+  const accept = btn(o.accept_label || "Accept", null, back ? "sm" : "primary");
+  const later = btn(o.snooze_label || "Not now", null, "ghost");
+  const why = back ? `${plural(o.skips || 0, "skipped card")} in a row` : `${plural(o.streak || 0, "clean approval")} in a row`;
+  const c = h("section", {class: "card offer" + (back ? " step-back" : ""), "aria-label": `${back ? "Step back" : "Offer"}: ${wfName(o.workflow)}`},
+    h("div", {class: "card-head"}, h("span", {class: "stamp accent-ink"}, back ? "Step back?" : "Offer"), chipFor({workflow: o.workflow, level: o.from_level})),
     h("p", {class: "offer-text", text: o.text || `Move ${wfName(o.workflow)} from ${levelName(o.from_level)} to ${levelName(o.to_level)}?`}),
-    h("p", {class: "note", text: `${plural(o.streak || 0, "clean approval")} in a row · ${levelName(o.from_level)} → ${levelName(o.to_level)}`}),
+    h("p", {class: "note", text: `${why} · ${levelName(o.from_level)} → ${levelName(o.to_level)}`}),
     h("div", {class: "actions"}, accept, later), status);
   const go = async action => {
     accept.disabled = later.disabled = true;
     try {
       const row = await promote(o.workflow, action);
-      status.textContent = action === "accept" ? `${wfName(o.workflow)} is now ${levelName((row && row.level) || o.to_level)}.` : "Okay, staying as it is. Vaani will ask again later.";
+      status.textContent = action === yes ? `${wfName(o.workflow)} is now ${levelName((row && row.level) || o.to_level)}.`
+        : back ? `Keeping ${levelName(o.from_level)}.` : "Okay, staying as it is. Vaani will ask again later.";
       c.classList.add("done");
     } catch (e) { status.textContent = e.message; status.classList.add("err"); accept.disabled = later.disabled = false; }
   };
-  accept.onclick = () => go("accept");
-  later.onclick = () => go("snooze");
+  accept.onclick = () => go(yes);
+  later.onclick = () => go(no);
   return add(c);
 }
 
@@ -720,17 +739,28 @@ function showAutonomy(body) {
 }
 
 // ---- proof
+function ago(iso) {
+  const t = Date.parse(iso || "");
+  if (Number.isNaN(t)) return "at an unknown time";
+  const m = Math.max(0, Math.round((Date.now() - t) / 60000));
+  if (m < 1) return "just now";
+  if (m < 60) return `${m} min ago`;
+  const hrs = Math.round(m / 60);
+  return hrs < 48 ? `${hrs} h ago` : `${Math.round(hrs / 24)} days ago`;
+}
 const KIND_NAME = {email_send: "Email", email_modify: "Mailbox change", event_create: "New event", event_update: "Event change", event_delete: "Event delete", event_rsvp: "RSVP"};
 function outcome(r) {
   const t = r.tool || "";
   if (t === "commit_pending" || t === "create_calendar_event") {
     if (!r.ok) return {text: "Failed", tone: "risk"};
-    const by = {auto: "Auto", inline: "One-tap"}[r.confirmed_by] || "Approved";
+    const by = {policy: "Auto", auto: "Auto", inline: "One-tap", undo: "Undo"}[r.confirmed_by] || "Approved";
     return {text: by + (r.edited ? " · edited" : ""), tone: r.verified ? "ok" : "warn"};
   }
   if (t === "skip_pending") return {text: "Skipped", tone: "muted"};
   if (t === "promotion_accept") return {text: `Promotion accepted${r.level ? ` · ${levelName(r.level)}` : ""}`, tone: "accent"};
   if (t === "promotion_snooze") return {text: "Offer snoozed", tone: "muted"};
+  if (t === "undo_applied") return {text: "Undone by you", tone: "warn"};
+  if (t === "stepback_keep") return {text: "Kept level", tone: "muted"};
   if (t === "level_change") return {text: `Level changed${r.level ? ` · ${levelName(r.level)}` : ""}`, tone: "accent"};
   return {text: t.replace(/_/g, " ") || "Decision", tone: r.ok === false ? "risk" : "muted"};
 }
@@ -747,6 +777,15 @@ function showProof(body, wf) {
   loading(out);
   api(`/proof?limit=20${wf ? `&workflow=${encodeURIComponent(wf)}` : ""}`).then(j => {
     out.textContent = "";
+    const ev = j.evals;
+    if (ev && ev.total) {
+      const bad = (ev.suites || []).filter(x => !x.ok);
+      out.append(h("div", {class: "evals " + (ev.all_passed ? "ok" : "warn"), "aria-label": "Offline checks"},
+        h("p", {class: "evals-head"}, h("strong", {}, `Offline checks: ${ev.passed} of ${ev.total} passing`),
+          h("span", {class: "note"}, ` · ${(ev.suites || []).length} suites · ran ${ago(ev.ran_at)}`)),
+        h("p", {class: "note", text: bad.length ? `Failing: ${bad.map(x => `${x.name} ${x.passed}/${x.total}`).join(", ")}`
+          : (ev.suites || []).map(x => `${x.name} ${x.passed}`).join(" · ")})));
+    }
     const streaks = Object.entries(j.streaks || {});
     if (streaks.length) out.append(h("div", {class: "streaks", "aria-label": "Clean approvals in a row"},
       streaks.map(([k, n]) => h("span", {class: "chip" + (n ? " ok" : ""), title: "Clean approvals in a row"}, `${wfName(k)} · streak ${n}`))));

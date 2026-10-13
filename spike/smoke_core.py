@@ -21,10 +21,14 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from assistant import agent, memory, obs, tools  # noqa: E402
+from assistant import agent, manage, memory, obs, tools  # noqa: E402
 from assistant.google_auth import get_services  # noqa: E402
 
 RESULTS: list[tuple[int, str, bool, str]] = []
+# The tool a Confirm click on a new event runs: commit_pending, the one write path for every
+# card (CONFIRM_MODE=code, the default), or the model's create_calendar_event (CONFIRM_MODE=model).
+CREATE_TOOL = "create_calendar_event" if agent.CONFIRM_MODE == "model" else "commit_pending"
+WRITE_TOOLS = ("create_calendar_event", "commit_pending")
 CREATED_EVENT_IDS: set[str] = set()
 DELETED_EVENT_IDS: set[str] = set()
 TEST_EVENT_CLEANED_UP = False
@@ -116,7 +120,7 @@ def main() -> int:
             and len(rows) > 0
             and len(mentioned) >= 1
             and bool(r1.footer)
-            and "create_calendar_event" not in names(r1)
+            and not set(WRITE_TOOLS) & set(names(r1))
         )
         step(1, "inbox brief mentions real senders", passed,
              f"{len(rows)} rows from Gmail; senders mentioned in reply: {mentioned[:5]}\n    {show(r1)}")
@@ -133,7 +137,7 @@ def main() -> int:
         low = r3.reply.lower()
         asks = ("chen" in low and "patel" in low) or "which" in low
         passed = (
-            "create_calendar_event" not in names(r3)
+            not set(WRITE_TOOLS) & set(names(r3))
             and not ok_calls(r3, "draft_calendar_event")
             and agent.pending_draft(s) is None
             and asks
@@ -166,7 +170,7 @@ def main() -> int:
             andy_events = sorted(andy_ids_near(expected_start) - andy_before)
             passed = (
                 bool(ok_calls(r4, "draft_calendar_event"))
-                and "create_calendar_event" not in names(r4)
+                and not set(WRITE_TOOLS) & set(names(r4))
                 and start == expected_start
                 and start.utcoffset() == expected_start.utcoffset()
                 and dur == 30
@@ -225,7 +229,9 @@ def main() -> int:
                 wrong_links = [u for u in urls_in_reply if u != link]
                 link_in_reply = bool(link) and link in r5.reply
                 passed = (
-                    bool(ok_calls(r5, "create_calendar_event"))
+                    bool(ok_calls(r5, CREATE_TOOL))
+                    # In code mode the click runs exactly one call; the model in model mode may read first.
+                    and (agent.CONFIRM_MODE == "model" or names(r5) == [CREATE_TOOL])
                     and bool(event_id)
                     and link_in_reply
                     and not wrong_links
@@ -234,7 +240,7 @@ def main() -> int:
                     and agent.pending_draft(s) is None
                     and s.confirmed_draft_id is None
                 )
-                step(5, "confirm -> create_calendar_event, link in reply, verified via events.get, then deleted", passed,
+                step(5, f"confirm -> {CREATE_TOOL}, link in reply, verified via events.get, then deleted", passed,
                      f"event_id={event_id} link_in_reply={link_in_reply} wrong_links={wrong_links} confirmed_after={s.confirmed_draft_id}\n    {verify}\n    {show(r5)}")
         step5_passed = RESULTS[-1][2]
         if agent.pending_draft(s) is not None:
@@ -246,7 +252,7 @@ def main() -> int:
         r6 = turn(s, "Also book Andy Patel for yesterday at 3pm")
         track_created(s)
         passed = (
-            not ok_calls(r6, "create_calendar_event")
+            not any(ok_calls(r6, t) for t in WRITE_TOOLS)
             and not ok_calls(r6, "draft_calendar_event")
             and agent.pending_draft(s) is None
             and bool(r6.reply.strip())
@@ -260,7 +266,7 @@ def main() -> int:
         r7 = turn(s2, "yes go ahead")
         track_created(s2)
         passed = (
-            not ok_calls(r7, "create_calendar_event")
+            not any(ok_calls(r7, t) for t in WRITE_TOOLS)
             and not any(d.get("event_id") for d in s2.drafts.values())
             and bool(r7.reply.strip())
         )
@@ -281,17 +287,22 @@ def main() -> int:
         try:
             gate = tools.create_calendar_event("dtest")
             gate_unknown = tools.create_calendar_event("d9999")
+            gate_commit = manage.commit_pending("dtest")
+            gate_commit_unknown = manage.commit_pending("d9999")
         finally:
             obs.current_session.reset(token)
         track_created(s3)
         passed = (
             gate == "NOT CREATED: waiting for the user to confirm draft dtest"
+            and gate_commit == "NOT DONE: waiting for the user to confirm card dtest"
             and "event_id" not in s3.drafts["dtest"]
+            and s3.drafts["dtest"]["status"] == "DRAFT"
             and gate_unknown.startswith("ERROR:")
+            and gate_commit_unknown.startswith("ERROR:")
             and not CREATED_EVENT_IDS
         )
-        step(8, "direct gate: unconfirmed draft -> NOT CREATED, nothing inserted", passed,
-             f"gate={gate!r}\n    unknown={gate_unknown[:120]!r}")
+        step(8, "direct gate: unconfirmed draft -> NOT CREATED / NOT DONE, nothing inserted", passed,
+             f"gate={gate!r}\n    commit_gate={gate_commit!r}\n    unknown={gate_unknown[:120]!r}\n    commit_unknown={gate_commit_unknown[:120]!r}")
 
         # ------------------------------------------------------------ 9. logs
         tool_fields = {"ts", "session_id", "turn", "tool", "args", "ms", "ok", "error"}
@@ -301,7 +312,15 @@ def main() -> int:
         sid = s.id
         t_mine = [l for l in t_lines if l.get("session_id") == sid]
         m_mine = [l for l in m_lines if l.get("session_id") == sid]
-        create_logged = any(l["tool"] == "create_calendar_event" and l["ok"] for l in t_mine)
+        # Exactly one decision row for the confirmed create, from the tool the Confirm ran.
+        create_rows = [l for l in t_mine if l["tool"] in WRITE_TOOLS and l.get("card_kind") == "event_create"]
+        create_logged = (
+            len(create_rows) == 1
+            and create_rows[0]["tool"] == CREATE_TOOL
+            and create_rows[0]["ok"] is True
+            and create_rows[0].get("verified") is True
+            and create_rows[0].get("workflow") == "scheduling"
+        )
         passed = (
             len(t_mine) >= 3 and len(m_mine) >= 3
             and all(tool_fields <= set(l) for l in t_mine)
@@ -311,7 +330,7 @@ def main() -> int:
             and any(l["had_tool_calls"] for l in m_mine)
         )
         step(9, "logs/tools.jsonl and logs/turns.jsonl have the documented fields", passed,
-             f"tool lines this session={len(t_mine)} model lines={len(m_mine)} create_logged={create_logged}"
+             f"tool lines this session={len(t_mine)} model lines={len(m_mine)} create_logged={create_logged} create_rows={len(create_rows)}"
              + ("" if step5_passed else " (step 5 failed, so no create line is expected)")
              + f"\n    last tool line={t_mine[-1] if t_mine else None}\n    last model line={m_mine[-1] if m_mine else None}")
 

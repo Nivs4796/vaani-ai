@@ -21,10 +21,11 @@ from assistant import llm, memory, obs, tools
 
 MAX_ROUNDS = 6
 NUDGE_ROUNDS = 2  # one round to call create_calendar_event, one to report it
-# CONFIRM_MODE=code (default): a Confirm click runs create_calendar_event in code and the
-# reply is built from what Google stored; the model never decides whether a confirmed
-# write happens. CONFIRM_MODE=model: the model is asked to call the tool itself (the 7B
-# model skips the call on long transcripts, so this is only for comparison).
+# CONFIRM_MODE=code (default): a Confirm click runs manage.commit_pending in code (the one
+# write path for every card, new events included) and the reply is built from what Google
+# stored; the model never decides whether a confirmed write happens. CONFIRM_MODE=model: the
+# model is asked to call create_calendar_event itself for a new event (the 7B model skips the
+# call on long transcripts, so this is only for comparison).
 CONFIRM_MODE = os.environ.get("CONFIRM_MODE", "code").strip().lower()
 
 SYSTEM_RULES = """Rules:
@@ -1107,14 +1108,24 @@ def _commit_other_card(session: Session, did: str, t0: float, variant: str) -> T
         obs.current_session.reset(token)
 
 
-def _confirm_in_code(session: Session, did: str, t0: float) -> TurnResult:
-    """Confirm executed by code, not by the model.
+def _result_link(result: str) -> str:
+    """The htmlLink in a tool's JSON result (what Google stored), or ""."""
+    try:
+        data = json.loads(result)
+    except (TypeError, ValueError):
+        return ""
+    return str(data.get("htmlLink") or "") if isinstance(data, dict) else ""
 
-    Runs create_calendar_event directly (the gate is satisfied because the caller
-    set confirmed_draft_id for this draft), builds the reply from Google's answer,
-    and appends the call and its result to the transcript so later model turns
-    see exactly what happened. No model call, so no chance of the model skipping
-    the tool or inventing a link.
+
+def _confirm_in_code(session: Session, did: str, t0: float) -> TurnResult:
+    """Confirm of a new event, executed by code, not by the model.
+
+    Runs commit_pending directly, the same write path as every other card (the gate
+    is satisfied because the caller set confirmed_draft_id for this draft), builds the
+    reply from Google's read-back with the link pinned from the tool result, and
+    appends the call and its result to the transcript so later model turns see
+    exactly what happened. No model call, so no chance of the model skipping the
+    write or inventing a link.
     """
     pre_len = len(session.messages)
     pre_created = {d for d, v in session.drafts.items() if v.get("event_id")}
@@ -1122,16 +1133,18 @@ def _confirm_in_code(session: Session, did: str, t0: float) -> TurnResult:
     records: list[dict] = []
     try:
         session.messages.append({"role": "user", "content": f"{_now_tag()} User clicked Confirm on draft {did}."})
-        session.messages.append(
-            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "create_calendar_event", "arguments": {"draft_id": did}}}]}
-        )
-        result, record = _run_tool("create_calendar_event", {"draft_id": did})
+        args = {"draft_id": did}
+        session.messages.append({"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "commit_pending", "arguments": args}}]})
+        result, record = _run_tool("commit_pending", args)
         records.append(record)
-        session.messages.append({"role": "tool", "content": result, "tool_name": "create_calendar_event"})
+        session.messages.append({"role": "tool", "content": result, "tool_name": "commit_pending"})
         draft = session.drafts.get(did) or {}
         created = draft.get("created") if draft.get("event_id") else None
         if record["ok"] and created:
             reply = _report_created(created)
+            link = _result_link(result)
+            if link:
+                reply = _pin_verified_link(reply, link)  # the link is Google's, never model prose
         else:
             why = record.get("error") or result
             reply = f"I could not create draft {did}: {why} Nothing was created; confirm it again to retry."
@@ -1186,7 +1199,8 @@ def run_turn(
             return _result(session, "That draft was replaced by a newer one. Nothing was created; confirm the latest draft or ask me to draft it again.", [], _zero_usage(), t0)
         attempts_before = int(draft.get("insert_attempts") or 0)
         # The confirmation is scoped to THIS turn: the finally below clears it
-        # whatever happens, and create_calendar_event consumes it on first use.
+        # whatever happens, and the write (commit_pending, or create_calendar_event in
+        # CONFIRM_MODE=model) consumes it on first use.
         session.confirmed_draft_id = did
         if draft.get("kind", "event_create") != "event_create":
             return _commit_other_card(session, did, t0, str(confirm_variant or ""))

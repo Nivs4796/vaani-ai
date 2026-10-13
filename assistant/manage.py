@@ -2,9 +2,11 @@
 
 The model can only PREPARE an action: each tool here validates the request, works
 out exactly what would change, and stores it as a pending card on the session.
-commit_pending() is the only function that writes to Google, the model is never
-given it, and it refuses unless the server marked exactly that card confirmed
-(the user's click). Nothing here can permanently delete mail: the OAuth scope is
+commit_pending() is the only function that writes to Google, for every card including
+a new calendar event (tools.draft_calendar_event's drafts, kind event_create), the
+model is never given it, and it refuses unless the server marked exactly that card
+confirmed (the user's click). tools.create_calendar_event remains only as the model's
+tool for CONFIRM_MODE=model comparison runs, behind the same gate. Nothing here can permanently delete mail: the OAuth scope is
 gmail.modify, which Google does not allow to bypass Trash, and "delete" means Trash.
 
 Recipients follow the attendee rule from tools.py: a saved contact, an address the
@@ -829,9 +831,15 @@ def _commit_event(draft: dict) -> dict:
                        f"When: {_event_when(got, tz)}", "No guest was emailed."]}
 
 
+COMMIT_KINDS = ("email_send", "email_modify", "event_create", "event_update", "event_delete", "event_rsvp")
+
+
 @logged
 def commit_pending(draft_id="", variant="") -> str:
-    """Carry out a confirmed card. Never offered to the model; only the Confirm click calls it."""
+    """Carry out a confirmed card: the one write path for every card, new events included.
+    Never offered to the model; only the Confirm click (or Auto, through the same click path)
+    calls it. A new event (kind event_create; draft_calendar_event's drafts carry no kind)
+    keeps its own state keys, event_id / created / status CREATED, exactly as before."""
     try:
         session = _session()
         if session is None:
@@ -840,22 +848,34 @@ def commit_pending(draft_id="", variant="") -> str:
         draft = session.drafts.get(did)
         if draft is None:
             return _error(f"no card with id {did!r} exists in this conversation", "nothing to confirm")
+        kind = draft.get("kind") or "event_create"
         if draft.get("committed"):
             out = dict(draft["committed"])
             out["note"] = "This card was already carried out; nothing new was done."
             return _json(out)
+        if kind == "event_create" and draft.get("event_id"):
+            return base._already_created(draft)  # idempotent: never create twice for one draft
         if draft.get("status") != "DRAFT":
             return _error(f"card {did} is {str(draft.get('status')).lower()}", "ask the user to confirm the latest card")
         if getattr(session, "confirmed_draft_id", None) != did:
             return f"NOT DONE: waiting for the user to confirm card {did}"
         session.confirmed_draft_id = None  # one click authorises one attempt
-        kind = draft.get("kind")
-        if kind not in ("email_send", "email_modify", "event_update", "event_delete", "event_rsvp"):
-            return _error(f"card kind {kind!r} cannot be carried out here", "confirm it through the calendar path")
+        if kind not in COMMIT_KINDS:
+            return _error(f"card kind {kind!r} cannot be carried out here", "ask the user to draft it again")
         # This call's log row is the decision row: who confirmed, was it edited, did Google confirm it.
+        # Nothing it calls is @logged or annotates, so each write has exactly one decision row.
         decision = autonomy.commit_fields(draft, _str(variant))
         draft["confirmed_by"] = decision["confirmed_by"]
         obs.annotate(**decision, verified=False)
+        if kind == "event_create":
+            try:
+                return base._insert_confirmed_event(session, draft)
+            except Exception as e:
+                return _error(f"could not create the event ({type(e).__name__}: {e})", "check Google Calendar and try confirming again")
+            finally:
+                written, verified = base.event_create_outcome(draft)
+                obs.annotate(verified=verified)
+                autonomy.on_commit_result(draft, written, verified)
         try:
             if kind == "email_send":
                 result = _commit_email(draft, _str(variant))
