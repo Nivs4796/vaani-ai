@@ -8,8 +8,12 @@ given it, and it refuses unless the server marked exactly that card confirmed
 gmail.modify, which Google does not allow to bypass Trash, and "delete" means Trash.
 
 Recipients follow the attendee rule from tools.py: a saved contact, an address the
-user typed in this chat, or (for a reply) the sender of the email being answered.
+user typed in this chat, (for a reply) the sender of the email being answered, or
+(for a follow-up nudge) a recipient of the user's own sent message being followed up.
 An address that only appears inside some email can never become a recipient.
+
+Every card is tagged for autonomy.py (workflow, origin, proposed_hash, edited), and the
+commit row in logs/tools.jsonl carries the decision fields the promotion streak reads.
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 
 import assistant.tools as base
-from assistant import google_auth, memory, obs
+from assistant import autonomy, google_auth, memory, obs
 from assistant.obs import logged
 
 _error = base._error
@@ -50,15 +54,19 @@ def _card(title: str, lines: list[str], confirm_label: str, note: str, *, body: 
             "alt": alt, "danger": danger, "note": note}
 
 
-def _new_pending(session, kind: str, card: dict, **payload) -> dict:
-    """Store a pending action; only the newest one can be confirmed."""
+def _new_pending(session, kind: str, card: dict, *, origin: str | None = None, **payload) -> dict:
+    """Store a pending action; only the newest one can be confirmed. origin defaults to
+    obs.current_origin ("asked" unless a brief or follow-up code path set it)."""
     did = f"d{secrets.token_hex(2)}"
     while did in session.drafts:
         did = f"d{secrets.token_hex(2)}"
     prev = session.drafts.get(session.pending_draft_id or "")
+    draft = {"draft_id": did, "kind": kind, "status": "DRAFT", "card": card, **payload}
+    if origin:
+        draft["origin"] = origin
+    autonomy.tag_draft(draft, prev)  # before prev is superseded: a revision counts as an edit
     if prev is not None and prev.get("status") == "DRAFT":
         prev["status"] = "SUPERSEDED"
-    draft = {"draft_id": did, "kind": kind, "status": "DRAFT", "card": card, **payload}
     session.drafts[did] = draft
     session.pending_draft_id = did
     session.confirmed_draft_id = None  # a new card always needs its own click
@@ -192,6 +200,12 @@ def draft_email(to=None, subject="", body="", cc=None, reply_to_message_id="", f
         else:
             subj = " ".join(_str(subject).split())
             if not subj:
+                # The 7B model often leaves the subject out; take the body's first line instead of
+                # failing the turn. The card shows the subject before anything is sent.
+                first = next((ln.strip() for ln in (text or "").splitlines()
+                              if ln.strip() and not re.match(r"(?i)^(hi|hello|hey|dear)\b", ln.strip())), "")
+                subj = re.split(r"(?<=[.!?])\s", first, maxsplit=1)[0].rstrip(".!?")[:70].strip()
+            if not subj:
                 return _error("subject is missing", "write a short subject line and draft again")
         if not text:
             return _error("body is missing", "write the email text the user asked for and draft again")
@@ -220,6 +234,67 @@ def draft_email(to=None, subject="", body="", cc=None, reply_to_message_id="", f
         return _prepared(draft)
     except Exception as e:
         return _error(f"could not draft the email ({type(e).__name__}: {e})", "try again")
+
+
+@logged
+def draft_nudge(message_id: str = "", body: str = "") -> str:
+    """A follow-up on the user's OWN sent message: a reply in its thread to that message's
+    To and Cc (never the user), tagged workflow follow_ups / origin followup. Made by code
+    from the brief's Nudge button, never a model tool. Nothing is sent until Send."""
+    try:
+        session = _session()
+        if session is None:
+            return _error("no active session", "a follow-up can only be drafted inside a conversation turn")
+        mid = _str(message_id)
+        if not mid:
+            return _error("message_id is missing", "pass the id of the user's own sent message to follow up")
+        data = memory.load()
+        text = _str(body).strip()
+        name = str(data.get("name") or "").strip()
+        if name:
+            text = re.sub(r"\[\s*your\s+name\s*\]", name, text, flags=re.I)
+        if not text:
+            return _error("body is missing", "write the follow-up text and draft again")
+        gmail = google_auth.get_services()["gmail"]
+        msg, hdr, _orig_body = _message_full(gmail, mid)
+        own = base._own_address()
+        from_addr = email.utils.parseaddr(hdr.get("from", ""))[1].lower()
+        # Only the user's own message: its recipients are people the user already chose to write to.
+        # Gmail's SENT label, not the From header, which an incoming email can forge.
+        if "SENT" not in (msg.get("labelIds") or []):
+            return _error(f"message {mid} was not sent by the user", "a nudge can only follow up the user's own sent email")
+        mine = {a for a in (own, from_addr) if a}  # From of a sent message is the user (or a send-as alias)
+        to_list = list(dict.fromkeys(a.lower() for _, a in email.utils.getaddresses([hdr.get("to", "")]) if a and a.lower() not in mine))
+        cc_list = [a for a in dict.fromkeys(a.lower() for _, a in email.utils.getaddresses([hdr.get("cc", "")]) if a and a.lower() not in mine)
+                   if a not in to_list]
+        if not to_list and cc_list:
+            to_list, cc_list = cc_list, []
+        if not to_list:
+            return _error(f"message {mid} has no recipient other than the user", "there is nobody to follow up with")
+        # Recipient rule, follow-up case: exactly the addresses on the user's own message.
+        followed_up = set(to_list) | set(cc_list)
+        typed = base._typed_addresses(session)
+        to_list, err = base._coerce_attendees(to_list, data, typed | followed_up)
+        if not err and cc_list:
+            cc_list, err = base._coerce_attendees(cc_list, data, typed | followed_up)
+        if err:
+            return _error(err.replace("an attendee", "a recipient"), "ask the user to type the exact email address in the chat, then draft again")
+        orig_subject = " ".join(hdr.get("subject", "").split())
+        subj = orig_subject if orig_subject.lower().startswith("re:") else f"Re: {orig_subject}"
+        in_reply_to = hdr.get("message-id") or None
+        references = " ".join(x for x in [hdr.get("references", ""), in_reply_to or ""] if x).strip() or None
+        lines = [f"To: {', '.join(to_list)}"] + ([f"Cc: {', '.join(cc_list)}"] if cc_list else []) + [f"Subject: {subj}"]
+        note = "Nothing has been sent yet. It goes in the same thread as your earlier email."
+        placeholders = PLACEHOLDER_RE.findall(text)
+        if placeholders:
+            note += f" Check the text first: it still contains {placeholders[0]}."
+        card = _card("Follow-up draft", lines, "Send", note, body=text, alt={"label": "Save to Gmail drafts", "variant": "save_draft"})
+        draft = _new_pending(session, "email_send", card, origin="followup", to=to_list, cc=cc_list, subject=subj, body=text,
+                             thread_id=msg.get("threadId"), in_reply_to=in_reply_to, references=references, mode="nudge",
+                             source_message_id=mid)
+        return _prepared(draft)
+    except Exception as e:
+        return _error(f"could not draft the follow-up ({type(e).__name__}: {e})", "try again")
 
 
 # --------------------------------------------------------------------------- email: modify
@@ -355,51 +430,80 @@ def modify_emails(action="", message_ids=None, query="", group="", label="") -> 
         session = _session()
         if session is None:
             return _error("no active session", "email changes can only be prepared inside a conversation turn")
-        act = _ACTION_ALIASES.get(_str(action).strip().lower().replace(" ", "_"))
-        label_name = " ".join(_str(label).split())
-        said_act, said_group = _user_said(session)
-        if said_act and act != said_act and not (said_act in ("star", "unstar") and act in ("label", "unlabel")):
-            act = said_act  # the user's explicit verb wins
-            if label_name.lower().replace(" ", "_") in base.INBOX_GROUPS + ("promotion", "update"):
-                label_name = ""  # "promotions" was the group, not a label
-        if said_group and not _as_list(message_ids) and not _str(query) and not _str(group):
-            group = said_group
-        if label_name.lower().replace(" ", "_") in base.INBOX_GROUPS and act in ("label", "unlabel") and said_group:
-            return _error(f"'{label_name}' is a group of emails, not a label", "ask the user what to do with those emails: archive, mark read, or trash")
-        if not act:
-            return _error(f"unknown action {action!r}", f"use one of: {', '.join(sorted(set(_ACTION_ALIASES.values())))}")
-        if act in ("label", "unlabel") and not label_name:
-            return _error("label is missing", "pass the label name, e.g. Clients")
-        gmail = google_auth.get_services()["gmail"]
-        ids, source = _resolve_targets(gmail, message_ids, _str(query), _str(group), act)
-        if not source:
-            return _error("no emails were specified", "pass message_ids from list_recent_emails, a Gmail query such as from:cloudflare, or group=promotions")
-        if not ids:
-            return _error(f"no emails matched {source}", "tell the user nothing matched and ask what they meant")
-        will_create_label = False
-        if act in ("label", "unlabel"):
-            lid = _label_id(gmail, label_name)
-            if lid is None and act == "unlabel":
-                return _error(f"there is no label called {label_name!r}", "ask the user for the exact label name")
-            will_create_label = lid is None
-        meta = base._batch_get(gmail, ids, ["From", "Subject"])
-        items = []
-        for mid in ids:
-            hdr = base._headers((meta.get(mid) or {}).get("payload") or {})
-            disp, addr = email.utils.parseaddr(hdr.get("from", ""))
-            items.append(f"{' '.join((disp or addr or '?').split())} - {' '.join(hdr.get('subject', '(no subject)').split())[:80]}")
-        verb = _VERBS[act] + (f" '{label_name}'" if act in ("label", "unlabel") else "")
-        notes = {
-            "trash": "Moves to Trash: Gmail keeps it for 30 days. Nothing is permanently deleted.",
-            "archive": "Archived mail stays in All Mail and in search.",
-        }
-        note = "Nothing has changed yet. " + notes.get(act, "")
-        if will_create_label:
-            note += f" Creates the label '{label_name}'."
-        card = _card(f"{verb}: {len(ids)} email(s)", _lines_capped(items), f"{_VERBS[act]} {len(ids)}", note.strip(),
-                     danger=act == "trash")
-        draft = _new_pending(session, "email_modify", card, action=act, ids=ids, label_name=label_name, source=source)
-        return _prepared(draft)
+        return _prepare_modify(session, action, message_ids, query, group, label, use_user_words=True)
+    except Exception as e:
+        return _error(f"could not prepare the email change ({type(e).__name__}: {e})", "try again")
+
+
+def _prepare_modify(session, action, message_ids, query, group, label, *, use_user_words: bool) -> str:
+    """The body of modify_emails. use_user_words=False for code paths (a brief button),
+    where the user's last typed message is about something else and must not change the verb."""
+    act = _ACTION_ALIASES.get(_str(action).strip().lower().replace(" ", "_"))
+    label_name = " ".join(_str(label).split())
+    said_act, said_group = _user_said(session) if use_user_words else (None, None)
+    if said_act and act != said_act and not (said_act in ("star", "unstar") and act in ("label", "unlabel")):
+        act = said_act  # the user's explicit verb wins
+        if label_name.lower().replace(" ", "_") in base.INBOX_GROUPS + ("promotion", "update"):
+            label_name = ""  # "promotions" was the group, not a label
+    if said_group and not _as_list(message_ids) and not _str(query) and not _str(group):
+        group = said_group
+    if label_name.lower().replace(" ", "_") in base.INBOX_GROUPS and act in ("label", "unlabel") and said_group:
+        return _error(f"'{label_name}' is a group of emails, not a label", "ask the user what to do with those emails: archive, mark read, or trash")
+    if not act:
+        return _error(f"unknown action {action!r}", f"use one of: {', '.join(sorted(set(_ACTION_ALIASES.values())))}")
+    if act in ("label", "unlabel") and not label_name:
+        return _error("label is missing", "pass the label name, e.g. Clients")
+    gmail = google_auth.get_services()["gmail"]
+    ids, source = _resolve_targets(gmail, message_ids, _str(query), _str(group), act)
+    if not source:
+        return _error("no emails were specified", "pass message_ids from list_recent_emails, a Gmail query such as from:cloudflare, or group=promotions")
+    if not ids:
+        return _error(f"no emails matched {source}", "tell the user nothing matched and ask what they meant")
+    will_create_label = False
+    if act in ("label", "unlabel"):
+        lid = _label_id(gmail, label_name)
+        if lid is None and act == "unlabel":
+            return _error(f"there is no label called {label_name!r}", "ask the user for the exact label name")
+        will_create_label = lid is None
+    meta = base._batch_get(gmail, ids, ["From", "Subject"])
+    items = []
+    for mid in ids:
+        hdr = base._headers((meta.get(mid) or {}).get("payload") or {})
+        disp, addr = email.utils.parseaddr(hdr.get("from", ""))
+        items.append(f"{' '.join((disp or addr or '?').split())} - {' '.join(hdr.get('subject', '(no subject)').split())[:80]}")
+    verb = _VERBS[act] + (f" '{label_name}'" if act in ("label", "unlabel") else "")
+    notes = {
+        "trash": "Moves to Trash: Gmail keeps it for 30 days. Nothing is permanently deleted.",
+        "archive": "Archived mail stays in All Mail and in search.",
+    }
+    note = "Nothing has changed yet. " + notes.get(act, "")
+    if will_create_label:
+        note += f" Creates the label '{label_name}'."
+    card = _card(f"{verb}: {len(ids)} email(s)", _lines_capped(items), f"{_VERBS[act]} {len(ids)}", note.strip(),
+                 danger=act == "trash")
+    draft = _new_pending(session, "email_modify", card, action=act, ids=ids, label_name=label_name, source=source)
+    return _prepared(draft)
+
+
+@logged
+def draft_triage(action: str = "", group: str = "", query: str = "", origin: str = "brief", message_ids=None) -> str:
+    """A mailbox-change card made by code (the brief's "Archive all" button), tagged with
+    its origin for the autonomy policy. Same card and result as modify_emails; never a model tool.
+    message_ids pins the card to exactly the emails the brief showed, so its count matches the brief."""
+    try:
+        session = _session()
+        if session is None:
+            return _error("no active session", "email changes can only be prepared inside a conversation turn")
+        ids = [str(i) for i in (message_ids or []) if str(i).strip()]
+        if not ids and not _str(group) and not _str(query):
+            return _error("no emails were specified", "pass group=promotions, a Gmail query or message ids")
+        token = obs.current_origin.set(_str(origin) or "brief")
+        try:
+            if ids:
+                return _prepare_modify(session, action, ids, "", "", "", use_user_words=False)
+            return _prepare_modify(session, action, None, _str(query), _str(group), "", use_user_words=False)
+        finally:
+            obs.current_origin.reset(token)
     except Exception as e:
         return _error(f"could not prepare the email change ({type(e).__name__}: {e})", "try again")
 
@@ -678,7 +782,7 @@ def _commit_modify(draft: dict) -> dict:
     report = [f"{what} {ok} of {len(ids)} email(s), verified in Gmail."]
     if act == "trash":
         report.append("They stay in Trash for 30 days; ask me to restore them if needed.")
-    return {"status": "DONE", "verified_count": ok, "count": len(ids), "report": report}
+    return {"status": "DONE", "verified": ok == len(ids), "verified_count": ok, "count": len(ids), "report": report}
 
 
 def _commit_event(draft: dict) -> dict:
@@ -746,18 +850,28 @@ def commit_pending(draft_id="", variant="") -> str:
             return f"NOT DONE: waiting for the user to confirm card {did}"
         session.confirmed_draft_id = None  # one click authorises one attempt
         kind = draft.get("kind")
-        if kind == "email_send":
-            result = _commit_email(draft, _str(variant))
-        elif kind == "email_modify":
-            result = _commit_modify(draft)
-        elif kind in ("event_update", "event_delete", "event_rsvp"):
-            result = _commit_event(draft)
-        else:
+        if kind not in ("email_send", "email_modify", "event_update", "event_delete", "event_rsvp"):
             return _error(f"card kind {kind!r} cannot be carried out here", "confirm it through the calendar path")
-        draft["committed"] = result
-        draft["status"] = "DONE"
-        if session.pending_draft_id == did:
-            session.pending_draft_id = None
+        # This call's log row is the decision row: who confirmed, was it edited, did Google confirm it.
+        decision = autonomy.commit_fields(draft, _str(variant))
+        draft["confirmed_by"] = decision["confirmed_by"]
+        obs.annotate(**decision, verified=False)
+        try:
+            if kind == "email_send":
+                result = _commit_email(draft, _str(variant))
+            elif kind == "email_modify":
+                result = _commit_modify(draft)
+            else:
+                result = _commit_event(draft)
+            draft["committed"] = result
+            draft["status"] = "DONE"
+            if session.pending_draft_id == did:
+                session.pending_draft_id = None
+        finally:
+            done = draft.get("committed")
+            verified = autonomy.verified_of(done)
+            obs.annotate(verified=verified)
+            autonomy.on_commit_result(draft, bool(done), verified)
         return _json(result)
     except Exception as e:
         return _error(f"could not carry out the action ({type(e).__name__}: {e})", "check Gmail or Google Calendar, then try again")
@@ -772,6 +886,8 @@ REGISTRY = {
     "find_free_time": find_free_time,
     "commit_pending": commit_pending,  # Confirm path only: deliberately NOT in TOOL_SCHEMAS
 }
+# draft_nudge and draft_triage are called by code (brief buttons), so they are in neither
+# REGISTRY nor TOOL_SCHEMAS: the model's tool list does not change.
 
 TOOL_SCHEMAS = [
     {"type": "function", "function": {"name": "draft_email", "description": "Prepare an email for the user to send: a new email, a reply (reply_to_message_id) or a forward (forward_message_id). Write the full text yourself. It shows a card; nothing is sent until the user clicks Send.", "parameters": {"type": "object", "properties": {

@@ -1,0 +1,906 @@
+/* Vaani AI web page ("Ledger"): an audit trail, not a chatbot.
+ *
+ * Every proposal shows exactly what will happen; every result shows the receipt Google gave.
+ * Everything here degrades: a field or route the server does not have (404) hides that piece
+ * of UI and the page keeps working as the classic Confirm / Cancel chat.
+ * DOM is always built with createElement / textContent, never innerHTML.
+ */
+"use strict";
+(() => {
+const $ = s => document.querySelector(s);
+
+// ---------------------------------------------------------------- shared helpers
+
+let me = null;
+
+function h(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") e.className = v;
+    else if (k === "text") e.textContent = v;
+    else if (k.startsWith("on") && typeof v === "function") e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v === true ? "" : String(v));
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) e.append(c);
+  return e;
+}
+
+function btn(label, onclick, cls, attrs) {
+  return h("button", Object.assign({type: "button", class: cls || null, onclick}, attrs || {}), label);
+}
+
+async function api(path, body, method) {
+  const opt = {method: method || (body !== undefined ? "POST" : "GET"), headers: {}, credentials: "same-origin"};
+  if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+  if (opt.method !== "GET" && me && me.csrf) opt.headers["X-CSRF-Token"] = me.csrf;
+  const r = await fetch(path, opt);
+  const j = await r.json().catch(() => ({}));
+  if (r.status === 401) { location.href = "/login"; }
+  if (!r.ok) { const e = new Error(j.error || `${path} failed (${r.status})`); e.status = r.status; throw e; }
+  return j;
+}
+
+// A 404 that is "this route does not exist" (older server), not "unknown session".
+const missingRoute = e => e && e.status === 404 && !/session/i.test(e.message || "");
+
+function tzOpt() { return me && me.tz ? {timeZone: me.tz} : {}; }
+function clock(d) {
+  try { return d.toLocaleTimeString("en-GB", Object.assign({hour: "2-digit", minute: "2-digit", second: "2-digit"}, tzOpt())); }
+  catch (_) { return d.toLocaleTimeString(); }
+}
+function dayKey(d) {
+  try { return d.toLocaleDateString("en-GB", tzOpt()); } catch (_) { return d.toDateString(); }
+}
+function shortStamp(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return String(iso || "");
+  if (dayKey(d) === dayKey(new Date())) return clock(d);
+  try { return d.toLocaleString("en-GB", Object.assign({day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"}, tzOpt())); }
+  catch (_) { return d.toLocaleString(); }
+}
+const plural = (n, one, many) => `${n} ${n === 1 ? one : (many || one + "s")}`;
+
+// "Ravi Kumar <ravi@x.com>" -> "Ravi"; a bare address stays as it is.
+function who(addr) {
+  const s = String(addr || "").trim();
+  const m = s.match(/^"?([^"<]+?)"?\s*<[^>]+>$/);
+  return m ? m[1].trim().split(/\s+/)[0] : s;
+}
+
+// ---------------------------------------------------------------- sign-in page
+
+if (document.body.dataset.page === "login") {
+  const err = new URLSearchParams(location.search).get("error");
+  const line = $("#loginError");
+  if (err && line) {
+    const known = {access_denied: "Google sign-in was cancelled. Nothing was shared."};
+    const sentence = err.charAt(0).toUpperCase() + err.slice(1) + (/[.!?]$/.test(err) ? "" : ".");
+    line.textContent = known[err] || (/\s/.test(err) ? sentence : `Sign-in did not finish (${err}).`);
+    line.hidden = false;
+  }
+  return;
+}
+
+// ---------------------------------------------------------------- chat page
+
+const app = $("#app"), rail = $("#rail"), drawer = $("#drawer"), scrim = $("#scrim");
+const log = $("#log"), scroller = $("#scroller"), box = $("#box"), send = $("#send"), form = $("#f");
+const BOX_PLACEHOLDER = box.placeholder;
+let sessionId = null, busy = false, briefCard = null, editing = null;
+
+const WF = {replies: "Replies", scheduling: "Scheduling", follow_ups: "Follow-ups", triage: "Triage"};
+const LEVELS = ["off", "suggest", "one_tap", "auto"];
+const LEVEL_NAME = {off: "Off", suggest: "Suggest", one_tap: "One-tap", auto: "Auto"};
+const wfName = k => WF[k] || k || "";
+const levelName = k => LEVEL_NAME[k] || k || "";
+
+function add(node) { log.appendChild(node); return node; }
+function scrollDown() { scroller.scrollTop = scroller.scrollHeight; }
+
+// ---- reply renderer (unchanged rules from the classic page)
+const IS_CAL = /^https:\/\/(?:www\.google\.com\/calendar\/|calendar\.google\.com\/)/;
+// Replies arrive as light markdown from the model. Render a safe subset by building DOM
+// nodes (never innerHTML): **bold**, numbered / bulleted lists, paragraphs, [label](url)
+// links and bare URLs. Calendar links get a fixed label so a mangled URL is never shown.
+const INLINE_RE = /\*\*([^*\n]+)\*\*|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>)\]]+)/g;
+function anchor(url, label) {
+  const a = h("a", {href: url, target: "_blank", rel: "noopener"});
+  a.textContent = IS_CAL.test(url) ? "Open in Google Calendar" : label; return a;
+}
+function inline(target, text) {
+  let last = 0; INLINE_RE.lastIndex = 0;
+  for (const m of String(text).matchAll(INLINE_RE)) {
+    if (m.index > last) target.appendChild(document.createTextNode(text.slice(last, m.index)));
+    if (m[1] != null) { const b = document.createElement("strong"); inline(b, m[1]); target.appendChild(b); }
+    else if (m[2] != null) target.appendChild(anchor(m[3], m[2]));
+    else target.appendChild(anchor(m[4], m[4].replace(/[.,;:!?]+$/, "")));
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) target.appendChild(document.createTextNode(text.slice(last)));
+}
+const LIST_RE = /^(\s*)(?:(\d+)[.)]|[-*•])\s+(.*)$/;
+// Lists: "1. Item" opens / continues an ordered list and keeps the model's own number (li.value),
+// so a list interrupted by sub-bullets never restarts at 1. A bullet that is indented, or that
+// follows a numbered item, is nested inside that item. A plain line ends the list.
+function renderReply(target, text) {
+  const lines = String(text || "").replace(/\r/g, "").split("\n");
+  let top = null, sub = null, lastLi = null, para = null;
+  const make = tag => document.createElement(tag);
+  for (const raw of lines) {
+    const line = raw.replace(/\s+$/, "");
+    if (!line.trim()) { para = null; continue; }   // blank line: lists stay open, paragraphs end
+    const m = line.match(LIST_RE);
+    if (m) {
+      const indent = m[1].replace(/\t/g, "  ").length, numbered = m[2] != null, tag = numbered ? "ol" : "ul";
+      const li = make("li");
+      if (numbered) li.value = parseInt(m[2], 10);
+      inline(li, m[3]);
+      para = null;
+      const nest = lastLi && (indent >= 2 || (!numbered && top && top.tagName === "OL"));
+      if (nest) {
+        if (!sub || sub.tagName.toLowerCase() !== tag || sub.parentNode !== lastLi) { sub = make(tag); lastLi.appendChild(sub); }
+        sub.appendChild(li);
+        continue;
+      }
+      if (!top || top.tagName.toLowerCase() !== tag) { top = make(tag); target.appendChild(top); }
+      top.appendChild(li); lastLi = li; sub = null;
+      continue;
+    }
+    top = sub = lastLi = null;
+    if (!para) { para = make("p"); target.appendChild(para); }
+    else para.appendChild(make("br"));
+    inline(para, line.replace(/^#{1,6}\s+/, ""));
+  }
+}
+
+// ---------------------------------------------------------------- turns
+
+function setBusy(b) {
+  busy = b; box.disabled = b; send.disabled = b; $("#newBtn").disabled = b;
+  document.querySelectorAll(".card.live button, [data-turn]").forEach(x => { if (!x.hasAttribute("data-off")) x.disabled = b; });
+  if (!b && drawer.hidden && !app.classList.contains("rail-open")) box.focus();
+}
+
+function spinner(verb) {
+  const t = h("span", {"aria-hidden": "true"}, `${verb}… 0.0s`);
+  const s = h("div", {class: "spin"}, h("span", {class: "sr"}, `${verb}…`), t);
+  const t0 = performance.now();
+  s._tick = setInterval(() => { t.textContent = `${verb}… ${((performance.now() - t0) / 1000).toFixed(1)}s`; }, 100);
+  s._stop = () => { clearInterval(s._tick); s.remove(); };
+  return s;
+}
+
+// One round trip that renders a TurnResult. opts: draft (the card being acted on), verb,
+// fallback {path, payload} for a route an older server lacks, after(r), onFail(e).
+async function turn(path, payload, label, opts = {}) {
+  if (busy || !sessionId) return null;
+  setBusy(true);
+  if (label) add(h("div", {class: "msg user"}, label));
+  const spin = add(spinner(opts.verb || "thinking"));
+  scrollDown();
+  try {
+    let r;
+    try { r = await api(path, Object.assign({session_id: sessionId}, payload)); }
+    catch (e) {
+      if (!(opts.fallback && missingRoute(e))) throw e;
+      r = await api(opts.fallback.path, Object.assign({session_id: sessionId}, opts.fallback.payload));
+    }
+    spin._stop();
+    renderTurn(r, opts);
+    return r;
+  } catch (e) {
+    spin._stop();
+    add(h("div", {class: "msg bot err"}, `Request failed: ${e.message}`));
+    if (opts.onFail) opts.onFail(e);
+    if (/unknown session/i.test(e.message)) { setBusy(false); await newChat(); }
+    return null;
+  } finally { setBusy(false); scrollDown(); }
+}
+
+function renderTurn(r, opts = {}) {
+  if (r.reply) renderReply(add(h("div", {class: "msg bot"})), r.reply);
+  const failed = (r.tool_calls || []).filter(t => !t.ok).length;
+  if (r.footer) add(h("div", {class: "meta" + (failed ? " err" : "")}, r.footer + (failed ? ` · ${failed} tool error(s)` : "")));
+  if (r.receipt) receiptCard(r.receipt, {auto: r.decision === "auto", draft: r.pending_draft || opts.draft || null});
+  const d = r.pending_draft;
+  retireLive(d && d.draft_id);
+  if (d) (r.decision === "inline" ? inlineCard : draftCard)(d);
+  if (r.offer) offerCard(r.offer);
+  if (opts.after) opts.after(r);
+  updateStrip(r);
+  // A sent nudge closes a waiting thread; GET /followups reads Gmail, so only refresh then.
+  if (r.receipt && ((opts.draft && opts.draft.workflow) || r.receipt.workflow) === "follow_ups") refreshFollowupCount();
+}
+
+// Only the newest card can be approved (the server refuses older ones too).
+function retireLive(keepId) {
+  for (const old of log.querySelectorAll(".card.live")) {
+    const same = keepId && old.dataset.draft === keepId;
+    old._done(same ? "Shown again below" : keepId ? "Replaced by a newer card" : "No longer waiting");
+  }
+}
+
+// ---------------------------------------------------------------- cards
+
+function chipFor(d) {
+  if (!d || !d.workflow) return null;
+  return h("span", {class: "chip accent"}, wfName(d.workflow) + (d.level ? ` · ${levelName(d.level)}` : ""));
+}
+
+function approveLabel(d, k) {
+  const base = k.confirm_label || "Confirm";
+  if (d.kind === "email_send" && base === "Send" && Array.isArray(d.to) && d.to.length)
+    return `Send to ${who(d.to[0])}${d.to.length > 1 ? ` +${d.to.length - 1}` : ""}`;
+  return base;
+}
+
+function cardOf(d) { return d.card || {title: `Draft: ${d.summary}`, lines: [], confirm_label: "Confirm", note: ""}; }
+
+// Shared by the full and the compact card: marks it finished and disables its buttons.
+function finisher(c, buttons, status) {
+  return text => {
+    c.classList.remove("live"); c.classList.add("done");
+    buttons.forEach(b => { b.disabled = true; b.setAttribute("data-off", ""); });
+    status.textContent = text;
+    const stamp = c.querySelector(".stamp");
+    const m = /^(Approved|Skipped)/.exec(text);
+    if (stamp) { stamp.classList.remove("accent-ink"); stamp.textContent = m ? m[1] : "Closed"; }
+    if (editing && editing === c.dataset.draft) endEdit();
+  };
+}
+
+function approveTurn(d, label, done, variant) {
+  done("Approved · waiting for Google");
+  const payload = {confirm_draft_id: d.draft_id};
+  if (variant) payload.confirm_variant = variant;
+  turn("/chat", payload, label, {
+    draft: d, verb: "carrying it out",
+    after: r => done(r.receipt ? "Approved · receipt below" : "Approved · see the reply below"),
+    onFail: () => done("Approved · the request failed, check Gmail or Calendar"),
+  });
+}
+
+function draftCard(d) {
+  const k = cardOf(d);
+  const c = h("section", {class: "card action live" + (k.danger ? " danger" : ""), "data-draft": d.draft_id, "aria-label": `Waiting for your approval: ${k.title}`});
+  c.append(h("div", {class: "card-head"}, h("span", {class: "stamp accent-ink"}, "Waiting for you"), chipFor(d)));
+  c.append(h("h4", {text: k.title}));
+  for (const line of k.lines || []) c.append(h("div", {class: "line", text: line}));
+  if (k.body) c.append(h("div", {class: "mailbody", text: k.body}));
+  if (k.note) c.append(h("p", {class: "note", text: k.note}));
+  const label = approveLabel(d, k);
+  const ok = btn(label, null, k.danger ? "danger" : "primary");
+  const alt = k.alt ? btn(k.alt.label) : null;
+  const edit = btn("Edit", null, "ghost", {title: "Tell Vaani what to change"});
+  const skip = btn("Skip", null, "ghost");
+  const status = h("span", {class: "status", role: "status"});
+  const buttons = [ok, alt, edit, skip].filter(Boolean);
+  c.append(h("div", {class: "actions"}, buttons, status));
+  const done = finisher(c, buttons, status);
+  c._done = done;
+  // Check busy BEFORE marking the card done: a click during an in-flight request must change nothing.
+  ok.onclick = () => { if (!busy) approveTurn(d, label, done); };
+  if (alt) alt.onclick = () => { if (!busy) approveTurn(d, k.alt.label, done, k.alt.variant); };
+  edit.onclick = () => { if (!busy) startEdit(d); };
+  skip.onclick = () => {
+    if (busy) return;
+    done("Skipped · nothing was changed");
+    turn("/skip", {draft_id: d.draft_id}, "Skip", {fallback: {path: "/chat", payload: {cancel_draft_id: d.draft_id}}});
+  };
+  return add(c);
+}
+
+// decision "inline" (One-tap): one line, one button.
+function inlineCard(d) {
+  const k = cardOf(d);
+  const label = approveLabel(d, k);
+  const ok = btn(label, null, k.danger ? "danger sm" : "primary sm");
+  const status = h("span", {class: "status", role: "status"});
+  const c = h("section", {class: "card action inline live" + (k.danger ? " danger" : ""), "data-draft": d.draft_id, "aria-label": `One tap to approve: ${k.title}`},
+    chipFor(d), h("span", {class: "inline-title", title: (k.lines || []).join("\n") || null, text: k.title}), ok, status);
+  const done = finisher(c, [ok], status);
+  c._done = done;
+  ok.onclick = () => { if (!busy) approveTurn(d, label, done); };
+  return add(c);
+}
+
+function receiptCard(rc, {auto, draft}) {
+  const wf = (draft && draft.workflow) || rc.workflow;
+  const kind = (draft && draft.kind) || "";
+  const source = rc.source || (wf === "scheduling" || /^event/.test(kind) || rc.htmlLink ? "Google Calendar" : "Gmail");
+  const failed = /ERROR|FAIL|NOT/i.test(rc.status || "");
+  const verified = typeof rc.verified === "number" ? (rc.count ? rc.verified >= rc.count : rc.verified > 0) : rc.verified === true;
+  const tone = failed ? "risk" : verified ? "ok" : "warn";
+  const tick = failed ? "Did not complete" : verified ? `✓ Verified by ${source}` : `Not verified · check ${source}`;
+  const c = h("section", {class: `card receipt ${tone}`, "aria-label": `Receipt from ${source}`});
+  c.append(h("div", {class: "card-head"},
+    h("span", {class: "stamp tone"}, `Receipt · ${source}`),
+    auto ? h("span", {class: "chip accent", title: "Carried out without a card, as set in Autonomy"}, "Auto") : null,
+    chipFor(wf ? {workflow: wf, level: draft && draft.level} : null),
+    h("span", {class: "tick tone"}, tick),
+    h("time", {class: "stamp when"}, clock(new Date()))));
+  const report = (rc.report && rc.report.length) ? rc.report : [rc.status || "No report from Google"];
+  const ul = h("ul", {class: "report"});
+  for (const line of report) { const li = h("li"); inline(li, String(line)); ul.append(li); }
+  c.append(ul);
+  if (rc.htmlLink) c.append(h("p", {class: "note"}, anchor(rc.htmlLink, "Open in Google Calendar")));
+  const undo = rc.undo || rc.undo_text;
+  if (undo) c.append(h("p", {class: "undo", text: typeof undo === "string" ? undo : (undo.text || undo.label || "")}));
+  return add(c);
+}
+
+function offerCard(o) {
+  const status = h("p", {class: "status", role: "status"});
+  const accept = btn("Accept", null, "primary");
+  const later = btn("Not now", null, "ghost");
+  const c = h("section", {class: "card offer", "aria-label": `Offer: ${wfName(o.workflow)}`},
+    h("div", {class: "card-head"}, h("span", {class: "stamp accent-ink"}, "Offer"), chipFor({workflow: o.workflow, level: o.from_level})),
+    h("p", {class: "offer-text", text: o.text || `Move ${wfName(o.workflow)} from ${levelName(o.from_level)} to ${levelName(o.to_level)}?`}),
+    h("p", {class: "note", text: `${plural(o.streak || 0, "clean approval")} in a row · ${levelName(o.from_level)} → ${levelName(o.to_level)}`}),
+    h("div", {class: "actions"}, accept, later), status);
+  const go = async action => {
+    accept.disabled = later.disabled = true;
+    try {
+      const row = await promote(o.workflow, action);
+      status.textContent = action === "accept" ? `${wfName(o.workflow)} is now ${levelName((row && row.level) || o.to_level)}.` : "Okay, staying as it is. Vaani will ask again later.";
+      c.classList.add("done");
+    } catch (e) { status.textContent = e.message; status.classList.add("err"); accept.disabled = later.disabled = false; }
+  };
+  accept.onclick = () => go("accept");
+  later.onclick = () => go("snooze");
+  return add(c);
+}
+
+async function promote(workflow, action) {
+  const row = await api(`/promotion/${encodeURIComponent(workflow)}`, {action});
+  if (drawerKind === "autonomy") showAutonomy();
+  return row;
+}
+
+// ---------------------------------------------------------------- brief
+
+const ROW_ACTIONS = {
+  // The server reads the email and asks the model what the sender wants (sets the email in focus);
+  // the user then says "reply saying ..." and gets a card.
+  reply: {label: "Reply", run: row => doAction({action: "reply", message_id: row.id, thread_id: row.thread_id}, `What does ${((row.sender || "they").split(/\s+/)[0])} want?`)},
+  nudge: {label: "Draft nudge", run: row => doAction({action: "nudge", message_id: row.id, thread_id: row.thread_id}, `Draft a nudge to ${row.sender || row.to_name || "them"}`)},
+  dismiss: {label: "Dismiss", cls: "ghost sm", run: (row, li) => doAction({action: "dismiss", thread_id: row.thread_id, message_id: row.id},
+    `Stop tracking “${row.subject || "this thread"}”`, r => { if (r && li) dismissRow(li); refreshFollowupCount(); })},
+  open: {label: "Open", run: row => showEmail(row)},
+};
+
+function doAction(payload, label, after) {
+  closeOverlays();
+  return turn("/action", payload, label, {after});
+}
+
+function dismissRow(li) {
+  li.classList.add("dismissed");
+  li.querySelectorAll("button").forEach(b => { b.disabled = true; b.setAttribute("data-off", ""); });
+}
+
+function rowEl(row) {
+  const li = h("li", {class: "row" + (row.unread ? " unread" : "")});
+  const sender = row.sender || row.to_name || row.from || "Unknown sender";
+  li.append(h("div", {class: "row-top"},
+    row.unread ? h("span", {class: "dot", title: "Unread"}, h("span", {class: "sr"}, "Unread")) : null,
+    h("span", {class: "sender", text: sender + (row.n > 1 ? ` ×${row.n}` : "")}),
+    row.days_waiting != null ? h("span", {class: "chip warn", text: `waiting ${plural(row.days_waiting, "day")}`}) : null,
+    h("span", {class: "date", text: row.date || ""})));
+  li.append(h("div", {class: "subj", text: row.subject || "(no subject)"}));
+  if (row.snippet) li.append(h("div", {class: "snip", text: row.snippet}));
+  const acts = h("div", {class: "row-actions"});
+  for (const a of row.actions || []) {
+    const spec = ROW_ACTIONS[a];
+    if (!spec) continue;
+    const b = btn(spec.label, () => { if (!busy) spec.run(row, li); }, spec.cls || "sm", a === "open" ? null : {"data-turn": true});
+    if (a !== "open" && busy) b.disabled = true;
+    acts.append(b);
+  }
+  if (acts.childNodes.length) li.append(acts);
+  return li;
+}
+
+const ROW_CAP = 5;
+function groupEl(g) {
+  const rows = g.rows || [];
+  const sec = h("div", {class: `group g-${g.key}`});
+  const n = g.count != null ? g.count : rows.length;
+  sec.append(h("h4", {}, g.title || g.key, h("span", {class: "count", text: String(n)})));
+  if (g.key === "promotions" || g.action === "archive_all" || (g.actions || []).includes("archive_all")) {
+    const msgs = g.messages || n;
+    if (!msgs) { sec.append(h("p", {class: "empty", text: g.empty_text || "Nothing here."})); return sec; }
+    sec.append(h("div", {class: "promo"},
+      h("span", {text: `${plural(msgs, "promotional email")} from ${plural(n, "sender")}`}),
+      btn("Archive all", () => { if (!busy) doAction({action: "archive_all"}, `Archive all ${plural(msgs, "promotion")}`); }, "sm", {"data-turn": true, disabled: busy})));
+    return sec;
+  }
+  if (!rows.length) { sec.append(h("p", {class: "empty", text: g.empty_text || "Nothing here."})); return sec; }
+  const ul = h("ul", {class: "rows"});
+  rows.forEach((row, i) => { const li = rowEl(row); if (i >= ROW_CAP) li.hidden = true; ul.append(li); });
+  sec.append(ul);
+  if (rows.length > ROW_CAP) {
+    const more = btn(`Show ${rows.length - ROW_CAP} more`, () => { ul.querySelectorAll("li[hidden]").forEach(li => { li.hidden = false; }); more.remove(); }, "link");
+    sec.append(more);
+  }
+  return sec;
+}
+
+function briefAge(b) {
+  const t = Date.parse(b && b.built_at);
+  return isNaN(t) ? null : Math.max(0, Math.floor((Date.now() - t) / 60000));
+}
+
+function updateStamp(c) {
+  const b = c._brief || {}, mins = briefAge(b), parts = [];
+  if (mins != null) parts.push(mins < 1 ? "Built just now" : `Built ${mins} min ago`);
+  if (b.covers_days != null) parts.push(`covers ${plural(b.covers_days, "day")}`);
+  if (b.count != null) parts.push(plural(b.count, "email"));
+  if (b.unread != null) parts.push(`${b.unread} unread`);
+  c._stamp.textContent = parts.join(" · ") + (parts.length ? " · " : "");
+  const stale = mins != null && mins >= 30;
+  c.classList.toggle("stale", stale);
+  c._stamp.title = stale ? "Older than 30 minutes: refresh to see new mail" : "";
+}
+
+function fillBrief(c, b) {
+  c.textContent = "";
+  c._brief = b;
+  c._stamp = h("span", {});
+  const refresh = btn("Refresh", () => refreshBrief(c, refresh), "link");
+  c.append(h("div", {class: "brief-head"}, h("h3", {}, "Inbox brief"), h("p", {class: "stamp-row"}, c._stamp, refresh)));
+  if (b.error) c.append(h("p", {class: "err-line", text: `Could not build the brief: ${b.error}`}));
+  for (const g of b.groups || []) c.append(groupEl(g));
+  updateStamp(c);
+}
+
+function briefEl(b) {
+  const c = h("section", {class: "card brief", "aria-label": "Inbox brief", tabindex: "-1"});
+  fillBrief(c, b);
+  return c;
+}
+
+async function refreshBrief(c, button) {
+  if (button) button.disabled = true;
+  c._stamp.textContent = "Refreshing from Gmail… ";
+  try { fillBrief(c, await api("/brief?refresh=1")); }
+  catch (e) { updateStamp(c); c.querySelector(".brief-head").after(h("p", {class: "err-line", text: `Refresh failed: ${e.message}`})); if (button) button.disabled = false; }
+}
+
+setInterval(() => document.querySelectorAll(".card.brief").forEach(c => c._brief && updateStamp(c)), 30000);
+
+let briefRoute = true;
+async function showBrief() {
+  closeOverlays();
+  if (briefCard && briefCard.isConnected) {
+    briefCard.scrollIntoView({block: "start", behavior: "smooth"});
+    briefCard.focus({preventScroll: true});
+    if ((briefAge(briefCard._brief) || 0) >= 30) refreshBrief(briefCard);
+    return;
+  }
+  const classic = () => turn("/chat", {text: "Check my latest emails and give me updates"}, "Check my latest emails and give me updates");
+  if (!briefRoute || busy || !sessionId) return briefRoute ? null : classic();
+  const b = $("#briefBtn"); b.disabled = true; b.setAttribute("aria-busy", "true");
+  const spin = spinner("building your brief");
+  const head = log.querySelector(":scope > .meta");  // pinned first, under the "New chat" stamp
+  if (head) head.after(spin); else log.prepend(spin);
+  try {
+    briefCard = briefEl(await api("/brief"));
+    spin.replaceWith(briefCard);
+    briefCard.scrollIntoView({block: "start"});
+    briefCard.focus({preventScroll: true});
+  } catch (e) {
+    spin._stop();
+    if (missingRoute(e)) { briefRoute = false; return classic(); }
+    add(h("div", {class: "msg bot err"}, `Could not build the brief: ${e.message}`));
+  } finally { b.disabled = busy; b.removeAttribute("aria-busy"); }
+}
+
+// ---------------------------------------------------------------- drawer
+
+let drawerKind = null, drawerTrigger = null;
+const narrow = w => window.matchMedia(`(max-width: ${w}px)`).matches;
+
+function syncScrim() {
+  const show = (app.classList.contains("rail-open") && narrow(899)) || (!drawer.hidden && narrow(1099));
+  scrim.hidden = !show;
+}
+
+function openDrawer(kind, title, trigger) {
+  drawerKind = kind;
+  if (trigger) drawerTrigger = trigger;
+  $("#drawerTitle").textContent = title;
+  const body = $("#drawerBody");
+  body.textContent = "";
+  drawer.hidden = false;
+  app.classList.add("with-drawer");
+  document.querySelectorAll(".rail-btn[data-panel]").forEach(b => b.setAttribute("aria-expanded", String(b.dataset.panel === kind)));
+  closeRail();
+  syncScrim();
+  $("#drawerTitle").focus();
+  return body;
+}
+
+function closeDrawer() {
+  if (drawer.hidden) return;
+  drawer.hidden = true;
+  app.classList.remove("with-drawer");
+  drawerKind = null;
+  document.querySelectorAll(".rail-btn[data-panel]").forEach(b => b.setAttribute("aria-expanded", "false"));
+  syncScrim();
+  const t = drawerTrigger; drawerTrigger = null;
+  if (t && t.isConnected && t.offsetParent !== null && !narrow(899)) t.focus(); else box.focus();
+}
+
+function openRail() { app.classList.add("rail-open"); $("#menuBtn").setAttribute("aria-expanded", "true"); syncScrim(); $("#newBtn").focus(); }
+function closeRail() { if (!app.classList.contains("rail-open")) return; app.classList.remove("rail-open"); $("#menuBtn").setAttribute("aria-expanded", "false"); syncScrim(); }
+// Overlays only: a docked drawer on a wide screen stays open while the chat works.
+function closeOverlays() { closeRail(); if (narrow(1099)) closeDrawer(); }
+
+function togglePanel(kind, title, fill, trigger) {
+  if (drawerKind === kind) { closeDrawer(); return; }
+  fill(openDrawer(kind, title, trigger));
+}
+
+function loading(parent) { return parent.appendChild(h("p", {class: "lede", text: "Loading…"})); }
+
+// ---- email detail (placeholder until a full reader exists)
+function showEmail(row) {
+  const body = openDrawer("email", "Email", document.activeElement);
+  const sender = row.sender || row.from || "Unknown sender";
+  body.append(h("div", {class: "email-meta"},
+    h("p", {class: "stamp", text: row.date || ""}),
+    h("h3", {text: row.subject || "(no subject)"}),
+    h("p", {class: "muted", text: `From ${sender}`})));
+  if (row.snippet) body.append(h("blockquote", {class: "mailbody", text: row.snippet}));
+  body.append(h("p", {class: "lede", text: "This is the preview from the brief. Ask Vaani to read the whole email; it reads it in Gmail and summarises it here."}));
+  const acts = h("div", {class: "actions"},
+    btn("Ask what they want", () => { closeOverlays(); turn("/chat", {text: `What does ${sender} want in "${row.subject || ""}"?`}, `What does ${sender} want in “${row.subject || ""}”?`); }, "primary", {"data-turn": true, disabled: busy}),
+    (row.actions || []).includes("reply") ? btn("Reply", () => ROW_ACTIONS.reply.run(row), null, {"data-turn": true, disabled: busy}) : null);
+  body.append(acts);
+  if (row.thread_id) body.append(h("p", {class: "note"}, h("a", {href: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(row.thread_id)}`, target: "_blank", rel: "noopener"}, "Open in Gmail")));
+}
+
+// ---- follow-ups
+let followRoute = false;
+function setFollowCount(rows) {
+  const b = $("#followBtn"), n = rows ? rows.length : 0;
+  b.hidden = !rows;
+  $("#followCount").textContent = n ? String(n) : "";
+  $("#followCount").hidden = !n;
+  b.setAttribute("aria-label", `Follow-ups, ${plural(n, "thread")} waiting`);
+}
+async function refreshFollowupCount() {
+  if (!followRoute) return;
+  try { const j = await api("/followups"); setFollowCount(j.rows || []); if (drawerKind === "followups") fillFollowups(j.rows || []); }
+  catch (e) { if (missingRoute(e)) { followRoute = false; setFollowCount(null); } }
+}
+function showFollowups(body) {
+  body.append(h("p", {class: "lede", text: "Threads where you wrote last and nobody has answered yet."}));
+  body.append(h("div", {id: "followList"}));
+  loading($("#followList"));
+  api("/followups").then(j => { setFollowCount(j.rows || []); fillFollowups(j.rows || []); })
+    .catch(e => { const l = $("#followList"); if (l) { l.textContent = ""; l.append(h("p", {class: "inline-err", role: "alert", text: e.message})); } });
+}
+function fillFollowups(rows) {
+  const list = $("#followList");
+  if (!list) return;
+  list.textContent = "";
+  if (!rows.length) { list.append(h("p", {class: "empty", text: "Nothing waiting. Every thread you started has an answer."})); return; }
+  const ul = h("ul", {class: "rows"});
+  for (const row of rows) {
+    const li = h("li", {class: "row"});
+    const name = row.to_name || row.sender || row.to_email || "them";
+    li.append(h("div", {class: "row-top"}, h("span", {class: "sender", text: `To ${name}`}),
+      row.days_waiting != null ? h("span", {class: "chip warn", text: `waiting ${plural(row.days_waiting, "day")}`}) : null));
+    li.append(h("div", {class: "subj", text: row.subject || "(no subject)"}));
+    if (row.snippet) li.append(h("div", {class: "snip", text: row.snippet}));
+    const err = h("p", {class: "inline-err", role: "alert"});
+    li.append(h("div", {class: "row-actions"},
+      btn("Draft nudge", () => { if (!busy) doAction({action: "nudge", message_id: row.message_id || row.id, thread_id: row.thread_id}, `Draft a nudge to ${name}`); }, "sm", {"data-turn": true, disabled: busy}),
+      btn("Dismiss", async () => {
+        try { await api(`/followups/${encodeURIComponent(row.thread_id)}/dismiss`, {}); dismissRow(li); refreshFollowupCount(); }
+        catch (e) { err.textContent = e.message; }
+      }, "ghost sm")), err);
+    ul.append(li);
+  }
+  list.append(ul);
+}
+
+// ---- autonomy
+const WF_DESC = {
+  replies: "Email replies Vaani writes for you.",
+  scheduling: "Creating, moving and answering calendar events.",
+  follow_ups: "Nudges on threads waiting for an answer.",
+  triage: "Archive, mark read, label and star. Trash always asks.",
+};
+const LEVEL_DESC = {
+  off: "Vaani does not propose these on its own. You can still ask.",
+  suggest: "Vaani proposes a full card. Nothing happens until you approve it.",
+  one_tap: "Vaani proposes a one-line card. One tap approves it.",
+  auto: "Vaani carries it out and shows you Google's receipt.",
+};
+// Workflows whose Auto needs an explicit unlock (anything that is not reversible triage).
+const UNLOCK = {
+  replies: {label: "Send without asking", title: "Send replies without asking?",
+    what: "When Replies is on Auto, Vaani will send the replies it writes from your Gmail without showing you a card first. Each one still gets a receipt from Gmail, and you can switch this off here at any time."},
+  follow_ups: {label: "Send nudges without asking", title: "Send nudges without asking?",
+    what: "When Follow-ups is on Auto, Vaani will send follow-up nudges from your Gmail on threads waiting for an answer, without showing you a card first. Each one still gets a receipt from Gmail, and you can switch this off here at any time."},
+  scheduling: {label: "Change my calendar without asking", title: "Change your calendar without asking?",
+    what: "When Scheduling is on Auto, Vaani will create and change events on your Google Calendar without showing you a card first. Guests may see the changes on their calendars. Each change still gets a receipt, and you can switch this off here at any time."},
+};
+
+function confirmDialog({title, text, ok, cancel}) {
+  const dlg = $("#confirmDlg");
+  if (!dlg || typeof dlg.showModal !== "function") return Promise.resolve(window.confirm(`${title}\n\n${text}`));
+  $("#dlgTitle").textContent = title; $("#dlgText").textContent = text;
+  $("#dlgOk").textContent = ok; $("#dlgCancel").textContent = cancel;
+  dlg.returnValue = "";
+  dlg.showModal();
+  $("#dlgCancel").focus();
+  return new Promise(resolve => dlg.addEventListener("close", () => resolve(dlg.returnValue === "ok"), {once: true}));
+}
+
+function wfRow(w0) {
+  let w = w0, err = "", focusKey = null;
+  const sec = h("section", {class: "wf", "aria-labelledby": `wf-${w0.key}`});
+  const put = async (patch, key) => {
+    focusKey = key;
+    try { w = Object.assign({}, w, await api(`/autonomy/${encodeURIComponent(w.key)}`, patch, "PUT")); err = ""; }
+    catch (e) { err = e.message; }
+    render();
+  };
+  const render = () => {
+    sec.textContent = "";
+    const title = w.title || wfName(w.key);
+    const ceil = LEVELS.indexOf(w.ceiling), maxIdx = ceil < 0 ? LEVELS.length - 1 : ceil;
+    const unlock = UNLOCK[w.key];
+    const lockedWhy = w.auto_allowed === false ? `Auto is not allowed for ${title} on this server.`
+      : unlock && !w.send_unlocked ? `Switch on “${unlock.label}” below first.` : "";
+    sec.append(h("div", {class: "wf-head"}, h("h3", {id: `wf-${w.key}`, text: title}),
+      h("span", {class: `chip lv-${w.level}`, text: levelName(w.level)})));
+    if (WF_DESC[w.key]) sec.append(h("p", {class: "wf-desc", text: WF_DESC[w.key]}));
+    const seg = h("div", {class: "seg", role: "group", "aria-label": `${title}: how much Vaani may do`});
+    LEVELS.forEach((lv, i) => {
+      const locked = lv === "auto" && lockedWhy;
+      const b = h("button", {type: "button", "data-key": lv, "aria-pressed": String(w.level === lv)},
+        locked ? h("span", {class: "lock", "aria-hidden": "true"}, "🔒") : null, levelName(lv));
+      if (i > maxIdx) { b.disabled = true; b.title = `Not available for ${title}`; }
+      else if (locked) { b.setAttribute("aria-disabled", "true"); b.setAttribute("aria-label", "Auto (locked)"); b.title = lockedWhy; b.onclick = () => { err = lockedWhy; focusKey = lv; render(); }; }
+      else if (lv !== w.level) b.onclick = () => put({level: lv}, lv);
+      seg.append(b);
+    });
+    sec.append(seg, h("p", {class: "level-desc", text: LEVEL_DESC[w.level] || ""}));
+    const next = LEVELS[LEVELS.indexOf(w.level) + 1];
+    if ((w.level === "suggest" || w.level === "one_tap") && next && LEVELS.indexOf(next) <= maxIdx && w.n_needed) {
+      const n = Math.min(w.n_needed, 10), s = Math.min(w.streak || 0, n), text = `${s} of ${n} toward ${levelName(next)}`;
+      const meter = h("div", {class: "meter", role: "meter", "aria-valuemin": "0", "aria-valuemax": String(n), "aria-valuenow": String(s), "aria-label": text});
+      for (let i = 0; i < n; i++) meter.append(h("span", {class: i < s ? "fill" : null}));
+      sec.append(h("div", {class: "meter-row"}, meter, h("span", {text})));
+      if (w.offer_due) {
+        sec.append(h("div", {class: "actions tight"},
+          h("span", {class: "offer-due", text: `Ready for ${levelName(next)}`}),
+          btn("Accept", async () => { try { await promote(w.key, "accept"); } catch (e) { err = e.message; render(); } }, "primary sm"),
+          btn("Not now", async () => { try { await promote(w.key, "snooze"); } catch (e) { err = e.message; render(); } }, "ghost sm")));
+      }
+    } else if (w.streak) {
+      sec.append(h("div", {class: "meter-row"}, h("span", {text: `${plural(w.streak, "clean approval")} in a row`})));
+    }
+    if (unlock && w.auto_allowed !== false) {
+      const sw = h("button", {type: "button", role: "switch", class: "switch", "data-key": "unlock", "aria-checked": String(!!w.send_unlocked), "aria-label": unlock.label},
+        h("span", {class: "knob", "aria-hidden": "true"}), h("span", {text: unlock.label}));
+      sw.onclick = async () => {
+        if (w.send_unlocked) return put({send_unlocked: false}, "unlock");
+        const yes = await confirmDialog({title: unlock.title, text: unlock.what, ok: unlock.label, cancel: "Keep asking"});
+        if (yes) put({send_unlocked: true}, "unlock"); else sw.focus();
+      };
+      sec.append(sw);
+    }
+    if (err) sec.append(h("p", {class: "inline-err", role: "alert", text: err}));
+    if (focusKey) { const f = sec.querySelector(`[data-key="${focusKey}"]`); if (f) f.focus(); focusKey = null; }
+  };
+  render();
+  return sec;
+}
+
+function showAutonomy(body) {
+  body = body || $("#drawerBody");
+  body.textContent = "";
+  body.append(h("p", {class: "lede", text: "How much Vaani may do on its own, for each kind of work. Every write still gets a receipt from Google."}));
+  if (me && me.flags && me.flags.autonomy === false)
+    body.append(h("p", {class: "notice", text: "Autonomy is switched off on this server, so every write waits for your approval whatever is set here."}));
+  const list = body.appendChild(h("div", {class: "wf-list"}));
+  loading(list);
+  api("/autonomy").then(j => {
+    list.textContent = "";
+    for (const w of j.workflows || []) list.append(wfRow(w));
+    if (!(j.workflows || []).length) list.append(h("p", {class: "empty", text: "No workflows reported by the server."}));
+  }).catch(e => { list.textContent = ""; list.append(h("p", {class: "inline-err", role: "alert", text: e.message})); });
+}
+
+// ---- proof
+const KIND_NAME = {email_send: "Email", email_modify: "Mailbox change", event_create: "New event", event_update: "Event change", event_delete: "Event delete", event_rsvp: "RSVP"};
+function outcome(r) {
+  const t = r.tool || "";
+  if (t === "commit_pending" || t === "create_calendar_event") {
+    if (!r.ok) return {text: "Failed", tone: "risk"};
+    const by = {auto: "Auto", inline: "One-tap"}[r.confirmed_by] || "Approved";
+    return {text: by + (r.edited ? " · edited" : ""), tone: r.verified ? "ok" : "warn"};
+  }
+  if (t === "skip_pending") return {text: "Skipped", tone: "muted"};
+  if (t === "promotion_accept") return {text: `Promotion accepted${r.level ? ` · ${levelName(r.level)}` : ""}`, tone: "accent"};
+  if (t === "promotion_snooze") return {text: "Offer snoozed", tone: "muted"};
+  if (t === "level_change") return {text: `Level changed${r.level ? ` · ${levelName(r.level)}` : ""}`, tone: "accent"};
+  return {text: t.replace(/_/g, " ") || "Decision", tone: r.ok === false ? "risk" : "muted"};
+}
+
+function showProof(body, wf) {
+  body = body || $("#drawerBody");
+  body.textContent = "";
+  body.append(h("p", {class: "lede", text: "The last 20 decisions, newest first. An approved write counts only when Vaani read it back from Google."}));
+  const sel = h("select", {id: "proofWf", "aria-label": "Workflow"}, h("option", {value: ""}, "All workflows"),
+    Object.keys(WF).map(k => h("option", {value: k, selected: k === wf}, WF[k])));
+  sel.onchange = () => showProof(body, sel.value);
+  body.append(h("div", {class: "proof-tools"}, sel, btn("Refresh", () => showProof(body, sel.value), "ghost sm")));
+  const out = body.appendChild(h("div", {}));
+  loading(out);
+  api(`/proof?limit=20${wf ? `&workflow=${encodeURIComponent(wf)}` : ""}`).then(j => {
+    out.textContent = "";
+    const streaks = Object.entries(j.streaks || {});
+    if (streaks.length) out.append(h("div", {class: "streaks", "aria-label": "Clean approvals in a row"},
+      streaks.map(([k, n]) => h("span", {class: "chip" + (n ? " ok" : ""), title: "Clean approvals in a row"}, `${wfName(k)} · streak ${n}`))));
+    const rows = j.rows || [];
+    if (!rows.length) { out.append(h("p", {class: "empty", text: "No decisions yet. Approve or skip a card and it shows up here."})); return; }
+    const ol = h("ol", {class: "proof-list"});
+    for (const r of rows) {
+      const o = outcome(r);
+      const v = r.verified === true ? h("span", {class: "tick ok", title: "Verified with Google"}, "✓", h("span", {class: "sr"}, " verified"))
+        : r.verified === false && r.ok !== false && /commit|create/.test(r.tool || "") ? h("span", {class: "tick warn", title: "Not verified"}, "!", h("span", {class: "sr"}, " not verified"))
+        : h("span", {class: "tick muted", "aria-hidden": "true"}, "–");
+      ol.append(h("li", {class: "proof-row"},
+        h("time", {datetime: r.ts || null}, shortStamp(r.ts)),
+        h("span", {class: "what"}, h("span", {}, [wfName(r.workflow), KIND_NAME[r.card_kind] || r.card_kind].filter(Boolean).join(" · ") || "—"),
+          h("span", {class: `outcome ${o.tone}`}, o.text)),
+        v,
+        h("span", {class: "ms"}, r.ms != null ? `${r.ms} ms` : "")));
+    }
+    out.append(ol);
+  }).catch(e => { out.textContent = ""; out.append(h("p", {class: "inline-err", role: "alert", text: e.message})); });
+}
+
+// ---------------------------------------------------------------- composer, strip, session
+
+function startEdit(d) {
+  editing = d.draft_id;
+  box.placeholder = "Tell me what to change";
+  form.classList.add("editing");
+  closeOverlays();
+  box.focus();
+}
+function endEdit() { editing = null; box.placeholder = BOX_PLACEHOLDER; form.classList.remove("editing"); }
+
+const isLocal = footer => /\blocal\b/.test(footer || "") || (me && me.model_local === true);
+function updateStrip(r) {
+  const strip = $("#strip");
+  strip.textContent = "";
+  const parts = [];
+  const model = (r && r.model) || (me && me.model);
+  if (model) parts.push(h("span", {}, model));
+  if (me && me.model_present === false) parts.push(h("span", {class: "warn"}, "model not loaded"));
+  if (r) {
+    if (r.latency_ms != null) parts.push(h("span", {}, `${(r.latency_ms / 1000).toFixed(1)}s`));
+    const names = [...new Set((r.tool_calls || []).map(t => t.name).filter(Boolean))];
+    parts.push(h("span", {}, names.length ? `tools: ${names.join(", ")}` : "no tools"));
+    if (isLocal(r.footer)) parts.push(h("span", {class: "local"}, "mail stayed on this Mac"));
+  } else parts.push(h("span", {}, "ready"));
+  parts.forEach((p, i) => { if (i) strip.append(h("span", {class: "sep", "aria-hidden": "true"}, " · ")); strip.append(p); });
+}
+
+function starter() {
+  const tries = ["Check my latest emails and give me updates", "What's on my calendar today?", "Find a free hour tomorrow afternoon"];
+  add(h("div", {class: "starter", "aria-label": "Suggestions"},
+    tries.map(t => btn(t, () => turn("/chat", {text: t}, t), "chip-btn", {"data-turn": true}))));
+}
+
+function reauthBanner() {
+  add(h("section", {class: "card banner warn", role: "alert"},
+    h("p", {}, "Google asked you to sign in again. Vaani cannot read or change anything until you do."),
+    h("div", {class: "actions"}, btn("Sign in again", () => { location.href = "/auth/login"; }, "primary"))));
+}
+
+async function newChat() {
+  if (busy) return;
+  log.textContent = ""; briefCard = null; sessionId = null; endEdit();
+  if (drawerKind === "email") closeDrawer();
+  if (me && me.reauth_required) reauthBanner();
+  setBusy(true);
+  const spin = add(spinner(me && me.flags && me.flags.brief_on_open ? "building your brief" : "starting a new chat"));
+  try {
+    const j = await api("/new", {});
+    spin._stop();
+    sessionId = j.session_id;
+    add(h("div", {class: "meta"}, `New chat ${sessionId}${me && me.now ? ` · ${me.now} ${me.tz || ""}` : ""}`));
+    if (j.brief) briefCard = add(briefEl(j.brief));
+    else starter();
+  } catch (e) {
+    spin._stop();
+    add(h("div", {class: "msg bot err"}, `Could not start a chat: ${e.message}`));
+  } finally { setBusy(false); }
+  refreshFollowupCount();
+}
+
+function renderMe() {
+  const line = $("#me");
+  line.textContent = `Connected as ${me.email} · ${(me.scopes || []).join(", ")} · model: ${me.model} (local) · now: ${me.now} ${me.tz}`;
+  if (me.model_present === false) { line.textContent += " · WARNING: model not loaded"; line.classList.add("warn"); }
+  line.title = line.textContent;
+  const u = me.user || {};
+  const email = u.email || me.email || "";
+  $("#acctName").textContent = u.name || (me.auth_mode === "google" ? "" : "This Mac");
+  $("#acctEmail").textContent = email;
+  const av = $("#avatar");
+  av.textContent = (u.name || email || "?").trim().charAt(0).toUpperCase();
+  if (u.picture) {
+    const img = h("img", {src: u.picture, alt: "", referrerpolicy: "no-referrer"});
+    img.onerror = () => img.remove();
+    av.append(img);
+  }
+  $("#signOut").hidden = me.auth_mode !== "google";
+  if (me.flags && me.flags.theme) document.body.classList.add(`theme-${me.flags.theme}`);
+}
+
+async function probeFeatures() {
+  const flags = me && me.flags;
+  const probe = p => api(p).then(j => j, () => null);
+  const [a, p, f] = await Promise.all([probe("/autonomy"), probe("/proof?limit=1"),
+    flags && flags.followups === false ? null : probe("/followups")]);
+  $("#autonomyBtn").hidden = !a;
+  $("#proofBtn").hidden = !p;
+  followRoute = !!f;
+  setFollowCount(f ? f.rows || [] : null);
+}
+
+// ---------------------------------------------------------------- wiring
+
+form.onsubmit = e => {
+  e.preventDefault();
+  const t = box.value.trim();
+  if (!t) return;
+  box.value = ""; endEdit();
+  turn("/chat", {text: t}, t);
+};
+$("#newBtn").onclick = () => { closeOverlays(); newChat(); };
+$("#briefBtn").onclick = () => { if (!busy) showBrief(); };
+$("#followBtn").onclick = e => togglePanel("followups", "Follow-ups", showFollowups, e.currentTarget);
+$("#autonomyBtn").onclick = e => togglePanel("autonomy", "Autonomy", showAutonomy, e.currentTarget);
+$("#proofBtn").onclick = e => togglePanel("proof", "Proof", body => showProof(body, ""), e.currentTarget);
+$("#drawerClose").onclick = closeDrawer;
+$("#menuBtn").onclick = () => app.classList.contains("rail-open") ? closeRail() : openRail();
+scrim.onclick = () => { closeRail(); closeDrawer(); };
+window.addEventListener("resize", syncScrim);
+$("#signOut").onclick = async () => {
+  try { await api("/auth/logout", {}); } catch (_) { /* signed out or not, the login page is next */ }
+  location.href = "/login";
+};
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape" || $("#confirmDlg").open) return;
+  if (app.classList.contains("rail-open")) { closeRail(); $("#menuBtn").focus(); }
+  else if (!drawer.hidden) closeDrawer();
+  else if (editing) endEdit();
+});
+
+(async () => {
+  updateStrip(null);
+  try {
+    me = await api("/me");
+    renderMe();
+    updateStrip(null);
+  } catch (e) {
+    if (e.status === 401) return;  // api() is already on its way to /login
+    $("#me").textContent = `Not connected: ${e.message}`;
+  }
+  probeFeatures();
+  await newChat();
+})();
+})();
