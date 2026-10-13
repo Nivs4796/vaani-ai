@@ -1,0 +1,9 @@
+{
+  "name": "Alex",
+  "timezone": "Asia/Kolkata",
+  "contacts": [
+    {"name": "Andy Chen", "email": "andy.chen@example.test"},
+    {"name": "Andy Patel", "email": "andy.patel@example.test"}
+  ],
+  "facts": []
+}
