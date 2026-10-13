@@ -10,6 +10,12 @@ A chat assistant that manages one account's real Gmail and Google Calendar, driv
 
 **What it cannot do.** Search the web, attach files, change Gmail settings, filters or forwarding, permanently delete anything, or act without being asked (no scheduled briefs yet).
 
+**Trust, earned per workflow.** Replies, scheduling, follow-ups and triage each sit on a ladder: Off, Suggest (a card waits for your click), One-tap (a one-line card with one button) or Auto. Code decides, never the model. Auto stays locked for anything that leaves your account until you switch on "send without asking"; trash is never automatic. Every approved card is logged with whether Google verified it, and after N clean approvals in a row (no edit, no skip, verified) Vaani offers to move that workflow up one level. The Proof panel shows those rows.
+
+**Brief first.** A new chat opens with the inbox brief already built in code (Needs a reply, Follow-ups, Worth knowing, Updates, Promotions) and stamped "built X ago, covers N days". Follow-ups are sent conversations still waiting on the other person; the Nudge button drafts a reply in the same thread, behind the same confirm step.
+
+**Accounts.** With `VAANI_AUTH=google`, the first "Sign in with Google" creates a Vaani account for that Google user (same Gmail and Calendar permissions as below, plus basic profile). Each user has their own memory, Google token (encrypted at rest) and logs; the server takes the user only from a signed session cookie. `VAANI_AUTH=single` (the default) is today's one-user `token.json` mode.
+
 ## Prerequisites
 
 - Ollama running (`ollama serve`) with `ollama pull qwen2.5:7b`
@@ -29,9 +35,12 @@ Testing-mode refresh tokens expire after 7 days. `google_auth.py` catches the `R
 
 - REPL: `.venv/bin/python -m assistant.cli` (`/new`, `/cancel`, `/savedraft`, `/quit`; a bare `yes` line carries out the pending card; "yes, but make it 4pm" goes to the model instead). On the web page only the card's button confirms; typing yes there just points at the button.
 - Web page: `.venv/bin/uvicorn assistant.web:app --port 8000` then open `http://localhost:8000` (Confirm / Cancel buttons, event link, New chat). If another project is already on 8000, use `--port 8010` and open that instead.
+- Demo mode with sign-in: `.venv/bin/python -m assistant.auth init-env` once (adds `VAANI_TOKEN_KEY` and `VAANI_SESSION_SECRET` to `.env`), copy the flags you want from `.env.example` (`VAANI_AUTH=google`, `VAANI_AUTONOMY=1`, `VAANI_PROMOTION=1`, `VAANI_BRIEF_ON_OPEN=1`, `VAANI_FOLLOWUPS=1`, `VAANI_THEME=ledger`), then `.venv/bin/uvicorn assistant.web:app --host 127.0.0.1 --port 8010` and open exactly `http://127.0.0.1:8010/`. Sign-in reuses the Desktop OAuth client in `credentials.json` with a loopback redirect, so no Cloud Console change is needed; the account must be a test user on the consent screen. `python -m assistant.auth import-token` turns today's `token.json` into the first account without a new consent.
+- Autonomy state: `python -m assistant.autonomy show` / `reset [--user <email>]` (reset before a demo so test approvals do not count).
 - Evals: `.venv/bin/python -m evals.run` (11 prompt-to-expected-tool cases; reads your real mail and calendar but can never confirm a card)
-- Offline checks, no model and no Google: `python -m evals.test_manage` (write actions against a fake Gmail and Calendar), `evals.test_guard`, `evals.test_attendees`, `evals.test_inbox`
+- Offline checks, no model and no Google: `python -m evals.test_manage` (write actions against a fake Gmail and Calendar), `evals.test_guard`, `evals.test_attendees`, `evals.test_inbox`, `evals.test_auth` (sign-in, sessions, CSRF, user isolation), `evals.test_autonomy` (the ladder), `evals.test_promotion` (streaks and offers), `evals.test_brief`, `evals.test_followups`. They pin every `VAANI_*` flag to its default and log to a temp folder, so `.env` and `logs/` never affect them.
 - Smoke test: `.venv/bin/python -m spike.smoke_core` (full Andy flow; creates and deletes one test event)
+- Demo smoke test: `.venv/bin/python spike/smoke_demo.py` (brief on open, Reply summary, a nudge and a triage card that are skipped, three drafts saved to your own address to earn a promotion offer, Proof rows; nothing is sent and no mailbox change is made)
 - Logs: `logs/tools.jsonl` (one line per tool call), `logs/turns.jsonl` (one line per model call)
 
 ## Demo prompts, in order

@@ -9,3 +9,8 @@ __pycache__/
 .DS_Store
 DEMO-PLAN.md
 .local-backup/
+
+# local build notes and handoff (not for the public repo)
+.build/
+data/users/
+data/vaani.db*

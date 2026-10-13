@@ -23,7 +23,7 @@ from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
 from zoneinfo import ZoneInfo
 
-from assistant import google_auth, memory, obs
+from assistant import autonomy, context, google_auth, memory, obs
 from assistant.obs import logged
 
 BODY_MAX_CHARS = 4000
@@ -47,6 +47,8 @@ ALIAS_FACT_RE = re.compile(r"(?i)^\s*(?:remember\s+)?(?:that\s+)?(.+?)\s+(?:mean
 # memory.json or the user typed it in this chat. Addresses the model read in an email or
 # made up are refused, so mail content can never put a stranger on an event. Extra
 # domains can be allowed with ALLOWED_ATTENDEE_DOMAINS=a.com,b.org in .env; "*" allows all.
+# Email recipients follow the same rule (manage.py), plus the sender being replied to and,
+# for a follow-up nudge, the To and Cc of the user's own sent message being followed up.
 ALLOWED_ATTENDEE_DOMAINS = os.environ.get("ALLOWED_ATTENDEE_DOMAINS", "").strip()
 
 # --------------------------------------------------------------------------- helpers
@@ -570,7 +572,7 @@ def _own_first_name() -> str:
 
 @logged
 def list_recent_emails(max_results=10, query="in:inbox newer_than:3d") -> str:
-    """Newest inbox messages as compact rows {id, from, subject, date, unread, group, snippet},
+    """Newest inbox messages as compact rows {id, from, subject, date, unread, important, group, snippet},
     plus the true unread count for the query (not just among the rows returned)."""
     try:
         n = max(1, min(_int(max_results, 10), 25))
@@ -603,6 +605,7 @@ def list_recent_emails(max_results=10, query="in:inbox newer_than:3d") -> str:
                     "subject": hdr.get("subject", "(no subject)"),
                     "date": _local_date(hdr.get("date", ""), tz),
                     "unread": "UNREAD" in labels,
+                    "important": "IMPORTANT" in labels,  # Gmail's own importance marker
                     "group": group,
                     "kind": "person" if group == "needs_reply" else "automated",
                     "snippet": html.unescape(msg.get("snippet") or "")[:SNIPPET_MAX],
@@ -737,11 +740,26 @@ def list_calendar_events(days_ahead=7, on_date="") -> str:
         return _error(f"could not list calendar events ({type(e).__name__}: {e})", "check the Google connection and try again")
 
 
-_own_email: str | None = None
+_own_email: str | None = None  # single-user mode (tests set it directly)
+_own_by_user: dict[str, str] = {}
 
 
 def _own_address() -> str:
+    """The connected account's address, per signed-in user (one global in single-user mode)."""
     global _own_email
+    uid = context.user_id()
+    if uid is not None:
+        if uid not in _own_by_user:
+            addr = str((context.current_user.get() or {}).get("email") or "")
+            if not addr:
+                try:
+                    addr = google_auth.connected_email()
+                except Exception:
+                    addr = ""
+            if not addr:
+                return ""  # not cached: try again next time
+            _own_by_user[uid] = addr.lower()
+        return _own_by_user[uid]
     if _own_email is None:
         try:
             _own_email = google_auth.connected_email().lower()
@@ -897,12 +915,13 @@ def draft_calendar_event(title="", start_iso="", duration_minutes=DEFAULT_DURATI
             "status": "DRAFT",
         }
         prev = session.drafts.get(session.pending_draft_id or "")
+        out = dict(draft)  # the model's result: without the autonomy tags, so its input is unchanged
+        autonomy.tag_draft(draft, prev)  # before prev is superseded: a revision counts as an edit
         if prev is not None and prev.get("status") == "DRAFT":
             prev["status"] = "SUPERSEDED"  # only the newest draft can be confirmed
         session.drafts[draft_id] = draft
         session.pending_draft_id = draft_id
         session.confirmed_draft_id = None  # a new draft always needs its own confirmation
-        out = dict(draft)
         out["duration_minutes"] = duration
         out["when"] = _when(start, end)
         if date_note:
@@ -942,82 +961,90 @@ def create_calendar_event(draft_id="") -> str:
             return f"NOT CREATED: waiting for the user to confirm draft {did}"
         # One confirmation authorises at most one insert attempt.
         session.confirmed_draft_id = None
-        draft["insert_attempts"] = int(draft.get("insert_attempts") or 0) + 1
-        cal = google_auth.get_services()["calendar"]
-        # The event id is chosen here and kept on the draft, so a library retry (or a
-        # later re-confirm after a lost response) can only hit 409 "already exists".
-        planned = draft.get("planned_event_id") or _new_event_id()
-        draft["planned_event_id"] = planned
-        body = {
-            "id": planned,
-            "summary": draft["summary"],
-            "start": {"dateTime": draft["start"], "timeZone": draft["tz"]},
-            "end": {"dateTime": draft["end"], "timeZone": draft["tz"]},
-        }
-        if draft.get("attendees"):
-            body["attendees"] = [{"email": a} for a in draft["attendees"]]
-        if draft.get("description"):
-            body["description"] = draft["description"]
-        duplicate = False
+        # This call's log row is the decision row: who confirmed, was it edited, did Google confirm it.
+        obs.annotate(**autonomy.commit_fields(draft), verified=False)
         try:
-            inserted = cal.events().insert(calendarId="primary", body=body, sendUpdates="none").execute(num_retries=2)
-        except Exception as e:
-            if _http_status(e) != 409:
-                raise
-            duplicate = True  # an earlier attempt was committed; verify it below
-            inserted = {"id": planned}
-        event_id = inserted.get("id") or planned
-        if duplicate:
+            draft["insert_attempts"] = int(draft.get("insert_attempts") or 0) + 1
+            cal = google_auth.get_services()["calendar"]
+            # The event id is chosen here and kept on the draft, so a library retry (or a
+            # later re-confirm after a lost response) can only hit 409 "already exists".
+            planned = draft.get("planned_event_id") or _new_event_id()
+            draft["planned_event_id"] = planned
+            body = {
+                "id": planned,
+                "summary": draft["summary"],
+                "start": {"dateTime": draft["start"], "timeZone": draft["tz"]},
+                "end": {"dateTime": draft["end"], "timeZone": draft["tz"]},
+            }
+            if draft.get("attendees"):
+                body["attendees"] = [{"email": a} for a in draft["attendees"]]
+            if draft.get("description"):
+                body["description"] = draft["description"]
+            duplicate = False
             try:
-                got = cal.events().get(calendarId="primary", eventId=event_id).execute(num_retries=2)
+                inserted = cal.events().insert(calendarId="primary", body=body, sendUpdates="none").execute(num_retries=2)
             except Exception as e:
-                return _error(f"event id {event_id} already exists but reading it back failed ({type(e).__name__}: {e})", "open Google Calendar to check, then confirm again")
-            if got.get("status") == "cancelled" or got.get("summary") != draft["summary"]:
-                draft["planned_event_id"] = _new_event_id()  # id collided with something else; use a fresh one next time
-                return _error("the planned event id collided with another event", "confirm the draft again")
-        else:
-            got = None
-        # Record the id immediately so a failure below can never cause a second insert.
-        draft["event_id"] = event_id
-        draft["status"] = "CREATED"
-        if session.pending_draft_id == did:
-            session.pending_draft_id = None
-        if got is None:
-            try:
-                got = cal.events().get(calendarId="primary", eventId=event_id).execute(num_retries=2)
-            except Exception as e:
-                # Inserted for sure (we hold the id); the read-back is the only thing that failed.
-                partial = {
-                    "status": "CREATED_UNVERIFIED",
-                    "id": event_id,
-                    "summary": inserted.get("summary") or draft["summary"],
-                    "start": inserted.get("start") or {"dateTime": draft["start"], "timeZone": draft["tz"]},
-                    "end": inserted.get("end") or {"dateTime": draft["end"], "timeZone": draft["tz"]},
-                    "attendees": [{"email": a} for a in draft.get("attendees") or []],
-                    "htmlLink": inserted.get("htmlLink"),
-                    "note": f"Created, but reading it back from Google Calendar failed ({type(e).__name__}: {e}); open the link to verify.",
-                }
-                draft["created"] = partial
-                return _json(partial)
-        tz = _tz()
-        start_txt, _ = _fmt_google_time(got.get("start"), tz)
-        end_txt, _ = _fmt_google_time(got.get("end"), tz)
-        result = {
-            "status": "CREATED",
-            "id": got.get("id"),
-            "summary": got.get("summary"),
-            "start": got.get("start"),
-            "end": got.get("end"),
-            "when": f"{start_txt} to {end_txt} ({(got.get('start') or {}).get('timeZone') or tz})",
-            "attendees": [
-                {"email": a.get("email"), "responseStatus": a.get("responseStatus")} for a in got.get("attendees", []) or []
-            ],
-            "htmlLink": got.get("htmlLink"),
-            "note": "Verified by reading the event back from Google Calendar."
-            + (" (An earlier attempt had already stored it; nothing new was created.)" if duplicate else ""),
-        }
-        draft["created"] = result
-        return _json(result)
+                if _http_status(e) != 409:
+                    raise
+                duplicate = True  # an earlier attempt was committed; verify it below
+                inserted = {"id": planned}
+            event_id = inserted.get("id") or planned
+            if duplicate:
+                try:
+                    got = cal.events().get(calendarId="primary", eventId=event_id).execute(num_retries=2)
+                except Exception as e:
+                    return _error(f"event id {event_id} already exists but reading it back failed ({type(e).__name__}: {e})", "open Google Calendar to check, then confirm again")
+                if got.get("status") == "cancelled" or got.get("summary") != draft["summary"]:
+                    draft["planned_event_id"] = _new_event_id()  # id collided with something else; use a fresh one next time
+                    return _error("the planned event id collided with another event", "confirm the draft again")
+            else:
+                got = None
+            # Record the id immediately so a failure below can never cause a second insert.
+            draft["event_id"] = event_id
+            draft["status"] = "CREATED"
+            if session.pending_draft_id == did:
+                session.pending_draft_id = None
+            if got is None:
+                try:
+                    got = cal.events().get(calendarId="primary", eventId=event_id).execute(num_retries=2)
+                except Exception as e:
+                    # Inserted for sure (we hold the id); the read-back is the only thing that failed.
+                    partial = {
+                        "status": "CREATED_UNVERIFIED",
+                        "id": event_id,
+                        "summary": inserted.get("summary") or draft["summary"],
+                        "start": inserted.get("start") or {"dateTime": draft["start"], "timeZone": draft["tz"]},
+                        "end": inserted.get("end") or {"dateTime": draft["end"], "timeZone": draft["tz"]},
+                        "attendees": [{"email": a} for a in draft.get("attendees") or []],
+                        "htmlLink": inserted.get("htmlLink"),
+                        "note": f"Created, but reading it back from Google Calendar failed ({type(e).__name__}: {e}); open the link to verify.",
+                    }
+                    draft["created"] = partial
+                    return _json(partial)
+            tz = _tz()
+            start_txt, _ = _fmt_google_time(got.get("start"), tz)
+            end_txt, _ = _fmt_google_time(got.get("end"), tz)
+            result = {
+                "status": "CREATED",
+                "id": got.get("id"),
+                "summary": got.get("summary"),
+                "start": got.get("start"),
+                "end": got.get("end"),
+                "when": f"{start_txt} to {end_txt} ({(got.get('start') or {}).get('timeZone') or tz})",
+                "attendees": [
+                    {"email": a.get("email"), "responseStatus": a.get("responseStatus")} for a in got.get("attendees", []) or []
+                ],
+                "htmlLink": got.get("htmlLink"),
+                "note": "Verified by reading the event back from Google Calendar."
+                + (" (An earlier attempt had already stored it; nothing new was created.)" if duplicate else ""),
+            }
+            draft["created"] = result
+            return _json(result)
+        finally:
+            created = draft.get("created") or {}
+            verified = bool(draft.get("event_id")) and created.get("status") == "CREATED"
+            obs.annotate(verified=verified)
+            autonomy.on_commit_result(draft, bool(draft.get("event_id")), verified)
     except Exception as e:
         return _error(f"could not create the event ({type(e).__name__}: {e})", "check Google Calendar and try confirming again")
 

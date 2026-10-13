@@ -2,15 +2,19 @@
 
 Commands: /new (fresh session), /cancel (drop the pending card), /savedraft (save an email card to Gmail drafts), /quit.
 A bare yes/confirm/go ahead/ok while a draft is pending confirms it.
+
+`--user <email>` runs as that signed-in Vaani account (its memory and stored Google
+token, see auth.py); without it everything uses token.json and data/memory.json.
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from assistant import agent, google_auth, llm, memory
+from assistant import agent, context, google_auth, llm, memory
 
 
 def header() -> str:
@@ -46,7 +50,29 @@ def print_result(r: agent.TurnResult) -> None:
         print(f"  └ Type yes to {card.get('confirm_label', 'Confirm').lower()}{extra}, or /cancel.")
 
 
-def main() -> int:
+def _sign_in_as(email: str) -> str | None:
+    """Set context.current_user to the account with this email. Returns an error message or None."""
+    from assistant import auth, store  # only --user touches the account database
+
+    try:
+        user = store.get_user_by_email(email)
+    except Exception as e:
+        return f"could not read the account database ({type(e).__name__}: {e})"
+    if not user:
+        return f"no Vaani account for {email}; sign in once on the web page (VAANI_AUTH=google) or run `python -m assistant.auth import-token`"
+    context.current_user.set(auth.public(user))
+    return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="python -m assistant.cli", description="Vaani AI terminal REPL")
+    parser.add_argument("--user", metavar="EMAIL", help="run as this signed-in Vaani account instead of token.json")
+    args = parser.parse_args(argv)
+    if args.user:
+        problem = _sign_in_as(args.user)
+        if problem:
+            print(f"ERROR: {problem}")
+            return 2
     try:
         info = llm.check_server()
         if not info["model_present"]:

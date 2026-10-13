@@ -315,6 +315,11 @@ def main() -> int:
         check("nothing is sent at draft time", not g.sent_raw)
         bad = manage.draft_email(["stranger@evil.example"], "Hi", "Hello")
         check("an address the user never typed is refused", bad.startswith("ERROR:") and "recipient" in bad, bad[:160])
+        r = j(manage.draft_email(["sam.lee@example.org"], "", "Hi Sam,\nThis is a Vaani UI test. Please ignore.\nAlex"))
+        d = s.drafts.get(r.get("draft_id"), {})
+        check("a missing subject comes from the body's first line (not the greeting)", d.get("subject") == "This is a Vaani UI test", d.get("subject"))
+        r = j(manage.draft_email(["sam.lee@example.org"], "Joining at 4", "Hi Alex,\nI'll join the 4pm call.\n[Your Name]"))  # back to the card the checks below confirm
+        d = s.drafts.get(r.get("draft_id"), {})
 
         # ---- the gate: commit refuses without the click
         res = manage.commit_pending(d["draft_id"])
