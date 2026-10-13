@@ -1,0 +1,11 @@
+credentials.json
+token.json
+.env
+.venv/
+logs/
+data/memory.json
+__pycache__/
+*.pyc
+.DS_Store
+DEMO-PLAN.md
+.local-backup/
