@@ -208,13 +208,38 @@ class _Labels:
         return Req(run)
 
 
+class HttpError(Exception):
+    """Stands in for googleapiclient's HttpError: tools._http_status reads status_code."""
+
+    def __init__(self, status: int, text: str = ""):
+        super().__init__(f"HTTP {status} {text}".strip())
+        self.status_code = status
+
+
 class FakeCal:
     def __init__(self):
         self.ev: dict[str, dict] = {}
         self.patches: list[tuple[str, dict]] = []
+        self.inserted: list[dict] = []  # every insert Google actually stored
+        self.fail_insert: str | None = None  # "before": fails, stores nothing; "after": stores, then the response is lost
 
     def events(self):
         return self
+
+    def insert(self, calendarId="primary", body=None, sendUpdates=None):
+        def run():
+            if self.fail_insert == "before":
+                raise HttpError(500, "backend error")
+            if body["id"] in self.ev:
+                raise HttpError(409, "already exists")  # caller-chosen id: a retry can never duplicate
+            ev = copy.deepcopy(body)
+            ev.update({"status": "confirmed", "htmlLink": f"https://www.google.com/calendar/event?eid={body['id']}"})
+            self.ev[body["id"]] = ev
+            self.inserted.append(copy.deepcopy(ev))
+            if self.fail_insert == "after":
+                raise TimeoutError("response lost")
+            return copy.deepcopy(ev)
+        return Req(run)
 
     def list(self, calendarId="primary", timeMin=None, timeMax=None, singleEvents=True, orderBy="startTime", maxResults=50, q=None):
         def run():
@@ -296,6 +321,19 @@ def j(text):
         return json.loads(text)
     except ValueError:
         return {}
+
+
+def log_rows(tool: str | None = None) -> list[dict]:
+    try:
+        rows = [json.loads(x) for x in obs.TOOLS_LOG.read_text().splitlines() if x.strip()]
+    except OSError:
+        return []
+    return [r for r in rows if tool is None or r.get("tool") == tool]
+
+
+def decision_rows(draft_id: str) -> list[dict]:
+    """Decision rows (commit rows carrying card_kind) for one card."""
+    return [r for r in log_rows() if r.get("card_kind") and r.get("draft_id") == draft_id]
 
 
 # --------------------------------------------------------------------------- checks
@@ -453,6 +491,89 @@ def main() -> int:
         r = j(manage.draft_email(["sam.lee@example.org"], "Later", "Text"))
         rc = agent.run_turn(s2, cancel_draft_id=r["draft_id"])
         check("cancelling an email says nothing was sent", rc.reply == "OK, nothing was sent.", rc.reply)
+
+        # ---- new events: commit_pending is the one write path (kind event_create)
+        s4 = agent.new_session()
+        obs.current_session.reset(token)
+        token = obs.current_session.set(s4)
+        user(s4, "Add a call with Andy Chen tomorrow at 5pm")
+        ev = j(tools.draft_calendar_event("Call with Andy Chen", f"{tmr.isoformat()}T17:00", 30, ["andy.chen@example.test"]))
+        did = ev.get("draft_id", "")
+        ed = s4.drafts.get(did, {})
+        check("draft_calendar_event makes a pending event card", ed.get("status") == "DRAFT" and s4.pending_draft_id == did, ev)
+        res = manage.commit_pending(did)
+        check("event_create without the Confirm click is refused, nothing inserted",
+              res.startswith(("NOT DONE:", "NOT CREATED:")) and not c.inserted and not ed.get("event_id") and ed.get("status") == "DRAFT", res[:120])
+        check("an unconfirmed commit writes no decision row", not decision_rows(did), decision_rows(did))
+        r9 = agent.run_turn(s4, confirm_draft_id=did)
+        stored = c.inserted[0] if c.inserted else {}
+        link = (ed.get("created") or {}).get("htmlLink") or ""
+        check("Confirm creates the event exactly once", len(c.inserted) == 1 and ed.get("event_id") == stored.get("id")
+              and ed.get("status") == "CREATED" and s4.pending_draft_id is None, (len(c.inserted), ed.get("status")))
+        check("the event has the drafted fields", stored.get("summary") == "Call with Andy Chen" and stored.get("attendees") == [{"email": "andy.chen@example.test"}]
+              and stored.get("start", {}).get("dateTime") == ed.get("start"), stored)
+        check("Confirm runs commit_pending, not create_calendar_event", [t["name"] for t in r9.tool_calls] == ["commit_pending"], r9.tool_calls)
+        calls = [m for m in s4.messages if m.get("role") == "assistant" and m.get("tool_calls")]
+        check("the transcript records the commit_pending call and its result",
+              calls and calls[-1]["tool_calls"][0]["function"] == {"name": "commit_pending", "arguments": {"draft_id": did}}
+              and s4.messages[-2].get("tool_name") == "commit_pending" and j(s4.messages[-2]["content"]).get("status") == "CREATED",
+              s4.messages[-3:])
+        check("the reply is Google's read-back with the verified link", r9.reply.startswith("Created and verified from Google Calendar: Call with Andy Chen")
+              and bool(link) and f"Link: {link}" in r9.reply and r9.reply.count("https://") == 1, r9.reply)
+        rows = decision_rows(did)
+        row = rows[0] if rows else {}
+        want = {"tool": "commit_pending", "workflow": "scheduling", "card_kind": "event_create", "confirmed_by": "user", "edited": False,
+                "verified": True, "ok": True, "origin": "asked"}
+        check("one decision row per create, from commit_pending", len(rows) == 1 and all(row.get(k) == v for k, v in want.items()), rows)
+        check("no create_calendar_event row on the default Confirm path", not log_rows("create_calendar_event"), log_rows("create_calendar_event"))
+        r10 = agent.run_turn(s4, confirm_draft_id=did)
+        check("a second Confirm creates nothing", len(c.inserted) == 1 and "already created" in r10.reply and link in r10.reply, r10.reply)
+        s4.confirmed_draft_id = did  # a double click that reaches the commit itself
+        again = manage.commit_pending(did)
+        check("a second commit returns the stored event and creates nothing",
+              len(c.inserted) == 1 and j(again).get("id") == ed.get("event_id") and "already created" in j(again).get("note", ""), again[:160])
+        check("and adds no decision row", len(decision_rows(did)) == 1, decision_rows(did))
+        s4.confirmed_draft_id = None
+
+        # A failed insert: nothing stored, the card stays confirmable, one failed decision row.
+        user(s4, "Add a call with Andy Chen tomorrow at 6pm")
+        did2 = j(tools.draft_calendar_event("Call with Andy Chen", f"{tmr.isoformat()}T18:00", 30, ["andy.chen@example.test"])).get("draft_id", "")
+        c.fail_insert = "before"
+        r11 = agent.run_turn(s4, confirm_draft_id=did2)
+        c.fail_insert = None
+        rows = decision_rows(did2)
+        check("a failed insert creates nothing and says so", len(c.inserted) == 1 and s4.drafts[did2]["status"] == "DRAFT"
+              and r11.reply.startswith(f"I could not create draft {did2}:") and "Nothing was created" in r11.reply, r11.reply)
+        check("the failed create has one decision row, not ok, not verified",
+              len(rows) == 1 and rows[0].get("ok") is False and rows[0].get("verified") is False and rows[0].get("card_kind") == "event_create", rows)
+        # The response of an insert Google DID store is lost: the re-confirm finds it (409) instead of duplicating it.
+        c.fail_insert = "after"
+        r12 = agent.run_turn(s4, confirm_draft_id=did2)
+        c.fail_insert = None
+        check("a lost insert response reports a failure and records no event", len(c.inserted) == 2 and not s4.drafts[did2].get("event_id"), r12.reply)
+        r13 = agent.run_turn(s4, confirm_draft_id=did2)
+        check("re-confirming after a lost response verifies the stored event instead of duplicating it",
+              len(c.inserted) == 2 and s4.drafts[did2].get("event_id") == c.inserted[1]["id"] and r13.reply.startswith("Created and verified")
+              and "nothing new was created" in r13.reply, r13.reply)
+        check("each confirm attempt has exactly one decision row", len(decision_rows(did2)) == 3
+              and [x.get("ok") for x in decision_rows(did2)] == [False, False, True], [(x.get("ok"), x.get("verified")) for x in decision_rows(did2)])
+
+        # CONFIRM_MODE=model keeps create_calendar_event: same gate, same insert, its own single decision row.
+        user(s4, "Add a call with Andy Chen tomorrow at 7pm")
+        did3 = j(tools.draft_calendar_event("Call with Andy Chen", f"{tmr.isoformat()}T19:00", 30, ["andy.chen@example.test"])).get("draft_id", "")
+        gate = tools.create_calendar_event(did3)
+        check("create_calendar_event keeps its gate", gate == f"NOT CREATED: waiting for the user to confirm draft {did3}" and len(c.inserted) == 2, gate)
+        s4.confirmed_draft_id = did3
+        made = j(tools.create_calendar_event(did3))
+        rows = decision_rows(did3)
+        check("create_calendar_event still creates once and annotates its own row", made.get("status") == "CREATED" and len(c.inserted) == 3
+              and s4.confirmed_draft_id is None and len(rows) == 1 and rows[0].get("tool") == "create_calendar_event" and rows[0].get("verified") is True, rows)
+        check("create_calendar_event is idempotent", "already created" in tools.create_calendar_event(did3) and len(c.inserted) == 3 and len(decision_rows(did3)) == 1)
+        s4.confirmed_draft_id = did3
+        check("and commit_pending agrees it is already created", "already created" in manage.commit_pending(did3) and len(c.inserted) == 3
+              and len(decision_rows(did3)) == 1)
+        s4.confirmed_draft_id = None
+        check("the model's tool list has no write tool", not {"create_calendar_event", "commit_pending"} & {t["function"]["name"] for t in tools.TOOL_SCHEMAS})
     finally:
         obs.current_session.reset(token)
 

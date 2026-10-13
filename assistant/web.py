@@ -492,6 +492,7 @@ class ActionIn(BaseModel):
     action: str
     message_id: str | None = None
     thread_id: str | None = None
+    draft_id: str | None = None  # undo: the carried-out card to reverse
 
 
 class SkipIn(BaseModel):
@@ -523,7 +524,7 @@ async def _in_session(request: Request, session_id: str, fn, *args):
 
 @app.post("/action")
 async def brief_action(request: Request, body: ActionIn):
-    return await _in_session(request, body.session_id, flow.action, body.action, body.message_id, body.thread_id)
+    return await _in_session(request, body.session_id, flow.action, body.action, body.message_id, body.thread_id, body.draft_id)
 
 
 @app.post("/skip")
@@ -583,8 +584,12 @@ def _offer_action(workflow: str, action: str) -> dict:
         autonomy.accept_offer(workflow)
     elif action == "snooze":
         autonomy.snooze_offer(workflow)
+    elif action == "step_back":
+        autonomy.accept_stepback(workflow)
+    elif action == "keep":
+        autonomy.keep_level(workflow)
     else:
-        raise ValueError(f"action must be accept or snooze, not {action!r}")
+        raise ValueError(f"action must be accept, snooze, step_back or keep, not {action!r}")
     return next(r for r in _autonomy_rows()["workflows"] if r["key"] == workflow)
 
 

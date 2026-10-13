@@ -247,12 +247,15 @@ def main() -> int:
         check("draft_calendar_event result has no autonomy tags", not set(autonomy.DRAFT_TAGS) & set(res), sorted(res))
         check("calendar draft is tagged scheduling / asked", ev.get("workflow") == "scheduling" and ev.get("origin") == "asked" and ev.get("proposed_hash"), ev)
         r = agent.run_turn(s, confirm_draft_id=ev["draft_id"])
-        row = log_rows("create_calendar_event")[-1]
+        row = log_rows("commit_pending")[-1]  # Confirm on a new event runs commit_pending, the one write path
         check("the event was created", ev.get("event_id") and r.reply.startswith("Created and verified"), r.reply)
-        want = {"workflow": "scheduling", "card_kind": "event_create", "confirmed_by": "user", "edited": False, "verified": True, "ok": True, "level": "suggest"}
-        check("create_calendar_event row carries the decision fields", all(row.get(k) == v for k, v in want.items()), row)
+        want = {"workflow": "scheduling", "card_kind": "event_create", "confirmed_by": "user", "edited": False, "verified": True, "ok": True,
+                "level": "suggest", "draft_id": ev["draft_id"]}
+        check("the event's commit_pending row carries the decision fields", all(row.get(k) == v for k, v in want.items()), row)
         refused = tools.create_calendar_event(ev["draft_id"])
-        check("a repeat create is idempotent and no new decision row", "already created" in refused and len(log_rows("create_calendar_event")) == 2 and "card_kind" not in log_rows("create_calendar_event")[-1], refused[:80])
+        ev_rows = [x for x in log_rows() if x.get("card_kind") == "event_create" and x.get("draft_id") == ev["draft_id"]]
+        check("a repeat create is idempotent and no new decision row", "already created" in refused and len(ev_rows) == 1
+              and "card_kind" not in log_rows("create_calendar_event")[-1], refused[:80])
 
         # ---- draft_nudge: the user's own sent message, its To and Cc, same thread
         s.turn += 1
