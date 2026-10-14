@@ -576,7 +576,7 @@ def list_recent_emails(max_results=10, query="in:inbox newer_than:3d") -> str:
     plus the true unread count for the query (not just among the rows returned)."""
     try:
         n = max(1, min(_int(max_results, 10), 25))
-        q = _str(query, "in:inbox newer_than:3d")
+        q = context.gmail_scope(_str(query, "in:inbox newer_than:3d"))
         tz = _tz()
         gmail = google_auth.get_services()["gmail"]
         listing = gmail.users().messages().list(userId="me", q=q, maxResults=n).execute(num_retries=2)
@@ -785,7 +785,7 @@ def find_contact(name="") -> str:
             listing = (
                 gmail.users()
                 .messages()
-                .list(userId="me", q=f'from:"{safe}" OR to:"{safe}" OR cc:"{safe}"', maxResults=10)
+                .list(userId="me", q=context.gmail_scope(f'from:"{safe}" OR to:"{safe}" OR cc:"{safe}"'), maxResults=10)
                 .execute(num_retries=2)
             )
             own = _own_address()

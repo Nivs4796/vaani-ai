@@ -30,7 +30,7 @@ from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 
 import assistant.tools as base
-from assistant import autonomy, google_auth, memory, obs
+from assistant import autonomy, context, google_auth, memory, obs
 from assistant.obs import logged
 
 _error = base._error
@@ -402,12 +402,12 @@ def _resolve_targets(gmail, message_ids, query: str, group: str, action: str) ->
         return list(dict.fromkeys(ids))[:MAX_TARGETS], "ids"
     if query:
         include_trash = action == "untrash" or "in:trash" in query.lower()
-        listing = gmail.users().messages().list(userId="me", q=query, maxResults=MAX_TARGETS, includeSpamTrash=include_trash).execute(num_retries=2)
+        listing = gmail.users().messages().list(userId="me", q=context.gmail_scope(query), maxResults=MAX_TARGETS, includeSpamTrash=include_trash).execute(num_retries=2)
         return [m["id"] for m in listing.get("messages", []) or []], f"query {query!r}"
     g = (group or "").strip().lower().replace(" ", "_").replace("-", "_")
     g = {"promotion": "promotions", "update": "updates", "people": "needs_reply", "needs_a_reply": "needs_reply"}.get(g, g)
     if g in base.INBOX_GROUPS:
-        listing = gmail.users().messages().list(userId="me", q="in:inbox newer_than:7d", maxResults=MAX_TARGETS).execute(num_retries=2)
+        listing = gmail.users().messages().list(userId="me", q=context.gmail_scope("in:inbox newer_than:7d"), maxResults=MAX_TARGETS).execute(num_retries=2)
         found = [m["id"] for m in listing.get("messages", []) or []]
         meta = base._batch_get(gmail, found, base.LIST_HEADERS)
         own_first = base._own_first_name()

@@ -188,15 +188,41 @@ def check_eval_status():
     check("the runner parses a suite's last line", eval_all.COUNT_RE.findall("x\n106/106 manage checks passed\n") == [("106", "106")])
 
 
+def check_demo_scope():
+    from assistant import context
+    os.environ["VAANI_DEMO_LABEL"] = ""
+    check("demo scope off: queries unchanged", context.gmail_scope("in:inbox newer_than:3d") == "in:inbox newer_than:3d")
+    os.environ["VAANI_DEMO_LABEL"] = "vaani-demo"
+    check("demo scope on: every query is fenced to the label",
+          context.gmail_scope("in:inbox newer_than:3d") == "(in:inbox newer_than:3d) label:vaani-demo", context.gmail_scope("in:inbox newer_than:3d"))
+    check("an OR query is fenced as a whole", context.gmail_scope('from:"Ravi" OR to:"Ravi"') == '(from:"Ravi" OR to:"Ravi") label:vaani-demo')
+    check("the label is not added twice", context.gmail_scope("label:vaani-demo is:unread") == "label:vaani-demo is:unread")
+    g, _c, _ = tm.setup()
+    seen = []
+    real_list = g.messages().__class__.list
+
+    def spy(self, userId="me", q="", maxResults=10, **kw):
+        seen.append(q)
+        return real_list(self, userId=userId, q=q, maxResults=maxResults, **kw)
+
+    g.messages().__class__.list = spy
+    try:
+        tm.tools.list_recent_emails(5, "in:inbox newer_than:3d")
+    finally:
+        g.messages().__class__.list = real_list
+        os.environ["VAANI_DEMO_LABEL"] = ""
+    check("list_recent_emails searches only the demo label", seen and all("label:vaani-demo" in q for q in seen), seen)
+
+
 def main() -> int:
-    for fn in (check_undo, check_undo_at_auto, check_stepback, check_nudge_rewrite, check_eval_status):
+    for fn in (check_undo, check_undo_at_auto, check_stepback, check_nudge_rewrite, check_eval_status, check_demo_scope):
         try:
             fn()
         except Exception as e:  # a crash in one group is a failure, not the end of the run
             import traceback
             check(f"{fn.__name__} crashed", False, f"{type(e).__name__}: {e}\n{traceback.format_exc()[-800:]}")
     passed = sum(1 for _, ok, _ in RESULTS if ok)
-    print(f"{passed}/{len(RESULTS)} undo and step-back checks passed")
+    print(f"{passed}/{len(RESULTS)} undo, step-back and demo-scope checks passed")
     return 0 if passed == len(RESULTS) else 1
 
 
