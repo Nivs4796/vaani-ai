@@ -6,6 +6,12 @@
 html { color-scheme: light; }
 html[data-theme="dark"] { color-scheme: dark; }
 body { background: var(--bg); }
+/* The app page itself never scrolls; only the chat, the rail sections and Settings do. Without this,
+   anything poking past the bottom of the window lets the whole page slide up under the header. */
+body:not(.login) { overflow: hidden; }
+/* Anchor absolutely positioned children (screen-reader-only labels and the like) inside the scroll
+   box, so it clips them instead of them stretching the page. */
+.scroller { position: relative; }
 
 /* ---------------------------------------------------------------- header */
 .topbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 52px; padding: 8px 16px;
@@ -24,7 +30,7 @@ html[data-theme="dark"] #themeToggle .i-sun { display: block; }
 html[data-theme="dark"] #themeToggle .i-moon { display: none; }
 
 /* ---------------------------------------------------------------- rail */
-.rail { background: var(--bg); border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 12px;
+.rail { position: relative; background: var(--bg); border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 12px;
   padding: 12px 10px 10px; min-height: 0; overflow: hidden; }
 #newBtn.new-pill { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 38px; margin: 0; padding: 8px 14px;
   border: 1px solid var(--line-2); border-radius: var(--r-pill); background: var(--surface); color: var(--ink); font-size: 14px; font-weight: 500; }
