@@ -97,6 +97,13 @@ const levelName = k => LEVEL_NAME[k] || k || "";
 
 function add(node) { log.appendChild(node); return node; }
 function scrollDown() { scroller.scrollTop = scroller.scrollHeight; }
+// Scroll the chat, never the page, so el's top sits just under the top of the thread.
+// (scrollIntoView would also scroll the page itself, sliding the header and rail off screen.)
+function scrollThreadTo(el, smooth) {
+  const top = scroller.scrollTop + el.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 12;
+  const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  scroller.scrollTo({top: Math.max(0, top), behavior: smooth && !still ? "smooth" : "auto"});
+}
 
 // ---- reply renderer (unchanged rules from the classic page)
 const IS_CAL = /^https:\/\/(?:www\.google\.com\/calendar\/|calendar\.google\.com\/)/;
@@ -513,7 +520,7 @@ async function showBrief() {
     // BRIEF's card says when it is stale and refreshes itself; the classic card is refreshed from here.
     if (briefCard.isStale && briefCard.isStale()) briefCard.refresh();
     else if (briefCard._stamp && (briefAge(briefCard._brief) || 0) >= 30) refreshBrief(briefCard);
-    briefCard.scrollIntoView({block: "start", behavior: reducedMotion() ? "auto" : "smooth"});
+    scrollThreadTo(briefCard, true);
     briefCard.focus({preventScroll: true});
     return;
   }
@@ -529,7 +536,7 @@ async function showBrief() {
     const brief = await api(`/brief?session_id=${encodeURIComponent(sessionId)}`);
     briefCard = (window.Vaani.renderBrief || briefEl)(brief);
     spin.replaceWith(briefCard);
-    briefCard.scrollIntoView({block: "start"});
+    scrollThreadTo(briefCard, false);
     if (briefCard.focus) briefCard.focus({preventScroll: true});
     window.Vaani.emit("brief:shown", {brief, el: briefCard});
   } catch (e) {
