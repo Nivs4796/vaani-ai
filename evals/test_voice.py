@@ -10,10 +10,12 @@ Run: .venv/bin/python -m evals.test_voice   (exit 1 on any failure)
 
 from __future__ import annotations
 
+import io
 import os
 import re
 import sys
 import time
+import wave
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -150,6 +152,8 @@ def route_checks(c: TestClient) -> None:
         st = c.get("/voice/status").json()
         check("status route shape", st.get("stt") == "loading" and st.get("tts") == "say" and st.get("voice", "").startswith("Samantha")
               and isinstance(st.get("voices"), list) and st["voices"] and {"name", "lang"} <= set(st["voices"][0]), st)
+        check("status adds wake (off until the model is ready), conf_min and cues", st.get("wake") == "off"
+              and isinstance(st.get("conf_min"), float) and 0 < st["conf_min"] <= 1 and isinstance(st.get("cues"), list), st)
     finally:
         voice.status, voice.start_warmup = real_status, real_start
     r = c.post("/voice/tts", json={"text": "Hello **Sam Lee**, see https://example.org/x"})
@@ -216,17 +220,58 @@ def model_checks(c: TestClient) -> None:
         data = (FIXTURES / fname).read_bytes()
         res = voice.transcribe(data)
         check(f"transcribe {fname} (>= 80% of the words)", overlap(res["text"], want) >= 0.8 and not res["empty"], res)
+        check(f"transcribe {fname}: confidence in (0, 1] and the clip length", 0 < res["confidence"] <= 1
+              and 1000 < res["duration_ms"] < 4000, res)
         print(f"stt {fname}: {res['ms']} ms -> {res['text']!r}")
     ctype = {"wav": "audio/wav", "webm": "audio/webm;codecs=opus"}
     for fname, want in (("voice-q1.webm", Q1), ("voice-q2.wav", Q2)):
         r = c.post("/voice/stt", content=(FIXTURES / fname).read_bytes(), headers={"Content-Type": ctype[fname.rsplit(".", 1)[1]]})
         body = r.json() if r.status_code == 200 else {}
         check(f"POST /voice/stt {fname}", r.status_code == 200 and overlap(body.get("text", ""), want) >= 0.8
-              and set(body) == {"text", "ms", "model", "empty"}, (r.status_code, r.text[:200]))
+              and set(body) == {"text", "ms", "model", "empty", "confidence", "duration_ms"}, (r.status_code, r.text[:200]))
     r = c.post("/voice/stt", content=b"this is not audio at all", headers={"Content-Type": "audio/webm"})
     check("undecodable audio is a 415, not a 500", r.status_code == 415, (r.status_code, r.text[:200]))
     r = c.post("/voice/stt", content=b"", headers={"Content-Type": "audio/webm"})
-    check("an empty recording is empty text", r.status_code == 200 and r.json().get("empty") is True, r.text[:200])
+    check("an empty recording is empty text", r.status_code == 200 and r.json().get("empty") is True
+          and r.json().get("confidence") == 0, r.text[:200])
+    silence = io.BytesIO()
+    with wave.open(silence, "wb") as w:
+        w.setnchannels(1), w.setsampwidth(2), w.setframerate(16000), w.writeframes(b"\0\0" * 16000)
+    res = voice.transcribe(silence.getvalue())
+    check("a second of silence: no text, confidence 0, 1000 ms long", res["empty"] and res["confidence"] == 0
+          and res["duration_ms"] == 1000, res)
+
+
+def cue_checks(c: TestClient) -> None:
+    from assistant import steps
+
+    want = {"list_calendar_events": "checking_calendar", "list_recent_emails": "reading_inbox", "read_email": "opening_email",
+            "draft_email": "writing_draft", "find_free_time": "looking_free_time", "commit_pending": "saving",
+            "create_calendar_event": "saving", "no_such_tool": "still_working", "": None, None: None}
+    got = {k: voice.cue_for_tool(k) for k in want}
+    check("cue_for_tool follows the contract", got == want, got)
+    check("every steps.py tool has a cue", all(voice.cue_for_tool(t) in voice.CUES for t in steps.STEPS))
+    check("contract cue names", list(voice.CUES) == ["on_it", "one_moment", "still_working", "checking_calendar", "reading_inbox",
+                                                     "opening_email", "writing_draft", "looking_free_time", "saving", "stopped",
+                                                     "cancelled", "didnt_catch"], list(voice.CUES))
+    wav = voice.synth("Checking your calendar.")
+    with wave.open(io.BytesIO(wav)) as w:
+        ms = int(w.getnframes() * 1000 / w.getframerate())
+    check("wav_ms matches the wave module", abs(voice.wav_ms(wav) - ms) <= 1 and ms > 500, (voice.wav_ms(wav), ms))
+    check("wav_ms of junk is 0", voice.wav_ms(b"") == 0 and voice.wav_ms(b"RIFF....WAVEjunk") == 0 and voice.wav_ms(b"x" * 100) == 0)
+    voice._start_cues()  # start_warmup() renders them in the background; wait for that here
+    t0 = time.perf_counter()
+    while len(voice.cue_names()) < len(voice.CUES) and time.perf_counter() - t0 < 90:
+        time.sleep(0.1)
+    check("all cues rendered at warm-up", voice.cue_names() == list(voice.CUES), voice.cue_names())
+    lens = {}
+    for name in voice.cue_names():
+        r = c.get(f"/voice/cue/{name}")
+        lens[name] = int(r.headers.get("x-vaani-audio-ms") or 0)
+        check(f"GET /voice/cue/{name}", r.status_code == 200 and r.content[:4] == b"RIFF" and 300 < lens[name] < 4000
+              and unquote(r.headers.get("x-vaani-spoken", "")) == voice.CUES[name], (r.status_code, dict(r.headers)))
+    check("status lists the rendered cues", c.get("/voice/status").json().get("cues") == list(voice.CUES))
+    print("cues (ms): " + ", ".join(f"{k} {v}" for k, v in lens.items()))
 
 
 def main() -> int:
@@ -236,6 +281,7 @@ def main() -> int:
     route_checks(c)
     autonomy_checks()
     model_checks(c)
+    cue_checks(c)
     failed = [x for x in CHECKS if not x[1]]
     for name, ok, detail in CHECKS:
         if not ok:

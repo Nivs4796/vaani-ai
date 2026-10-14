@@ -9,6 +9,8 @@
   /* Apply the saved theme before first paint (light is the default; dark is opt-in). */
   try { var t = localStorage.getItem("vaani.theme"); if (t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t); } catch (e) {}
   try { if (localStorage.getItem("vaani.rail") === "collapsed") document.documentElement.classList.add("rail-collapsed"); } catch (e) {}
+  /* Vaani always opens in Voice mode (mode.js may fall back to Chat when voice is off). */
+  document.documentElement.classList.add("mode-voice");
 </script>
 <link rel="stylesheet" href="/static/app.css">
 <link rel="stylesheet" href="/static/shell.css">
@@ -18,6 +20,9 @@
 <link rel="stylesheet" href="/static/history.css">
 <link rel="stylesheet" href="/static/rail.css">
 <link rel="stylesheet" href="/static/voice.css">
+<link rel="stylesheet" href="/static/hud.css">
+<link rel="stylesheet" href="/static/orb.css">
+<link rel="stylesheet" href="/static/mode.css">
 </head>
 <body>
 <div class="splash" id="splash" aria-hidden="true">
@@ -63,6 +68,7 @@
         </button>
         <span class="brand">Vaani</span>
       </div>
+      <span id="modeSlotChat" class="mode-slot"></span>
       <span id="me" class="me" hidden>Connecting…</span>
       <div class="top-actions">
         <button type="button" id="briefBtn" class="top-btn" data-turn aria-label="Show the inbox brief" title="Inbox brief">
@@ -111,6 +117,8 @@
     <div class="drawer-body" id="drawerBody"></div>
   </aside>
 </div>
+<!-- Voice mode: the Jarvis-style HUD (hud.js builds it; contract .build/CONTRACT-v3.md). -->
+<div id="hud" class="hud" aria-label="Vaani voice mode"></div>
 <div class="scrim" id="scrim" hidden></div>
 <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 
@@ -133,6 +141,11 @@
 <script src="/static/history.js" defer></script>
 <script src="/static/rail.js" defer></script>
 <script src="/static/voice.js" defer></script>
+<script src="/static/cues.js" defer></script>
+<script src="/static/orb.js" defer></script>
+<script src="/static/hud.js" defer></script>
+<script src="/static/handsfree.js" defer></script>
+<script src="/static/mode.js" defer></script>
 <script src="/static/app.js" defer onerror="var s=document.getElementById('splashStatus');if(s)s.textContent='Could not load /static/app.js: the server must serve the static/ folder at /static.'"></script>
 <script>
   /* Never let the splash hide the page for long, even if a script failed to load. */

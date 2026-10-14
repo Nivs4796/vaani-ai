@@ -1,0 +1,94 @@
+/* orb.css: the HUD's core (orb.js builds it). Contract: .build/CONTRACT-v3.md (CORE).
+ * Colours come only from the HUD's --hud-* tokens and --hud-tone (hud.css defines them on #hud),
+ * with the contract's values as fallbacks so the orb also draws on its own. Phases follow the
+ * approved mock-up: standby dim and slow, listening pulse, working = amber sweep, speaking =
+ * ripples, approval = slow dashed inner ring, countdown = red ring (orb.js drains it), done = green.
+ * --orb-scale / --orb-glow come from orb.js (the voice level). Reduced motion: still rings.
+ */
+
+/* ---- the button: 300px round and transparent (240px on narrow screens) */
+.orb-btn {
+  --orb-acc: var(--hud-acc, #0B7285);
+  --orb-line2: var(--hud-line2, rgba(26,25,22,.26));
+  --orb-amber: var(--hud-amber, #8A5A00);
+  --orb-red: var(--hud-red, #B42318);
+  --orb-green: var(--hud-green, #2E7D4F);
+  --orb-tone: var(--hud-tone, var(--orb-acc));
+  position: relative; display: block; flex: none; width: 300px; height: 300px; min-height: 0; margin: 0; padding: 0;
+  border: 0; border-radius: 50%; background: transparent; color: inherit; font: inherit; cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+html[data-theme="dark"] .orb-btn {
+  --orb-acc: var(--hud-acc, #4FD8FF);
+  --orb-line2: var(--hud-line2, rgba(120,205,255,.34));
+  --orb-amber: var(--hud-amber, #F5B544);
+  --orb-red: var(--hud-red, #FF6B5E);
+  --orb-green: var(--hud-green, #5FD38D);
+}
+/* The HUD's --hud-tone wins; these only matter when the orb is drawn without it. */
+.orb-btn[data-phase="working"], .orb-btn[data-phase="approval"] { --orb-tone: var(--hud-tone, var(--orb-amber)); }
+.orb-btn[data-phase="countdown"] { --orb-tone: var(--hud-tone, var(--orb-red)); }
+.orb-btn[data-phase="done"] { --orb-tone: var(--hud-tone, var(--orb-green)); }
+/* app.css styles every button (surface, border, hover fill): the orb keeps none of it. */
+.orb-btn:hover, .orb-btn:active { border: 0; background: transparent; }
+.orb-btn:focus { outline: none; }
+.orb-btn:focus-visible { outline: 2px solid var(--orb-acc); outline-offset: 2px; }
+.orb-btn::-moz-focus-inner { border: 0; }
+
+/* ---- the rings (viewBox 320): outer 152, ticks 136, mid 116, sweep 116, count 98, inner 80, ripples 58, core 50 */
+.orb-core { display: block; width: 100%; height: 100%; overflow: visible; transition: opacity .25s ease; }
+.orb-core circle { fill: none; transform-box: fill-box; transform-origin: 50% 50%; }
+.orb-core .r-outer { stroke: var(--orb-line2); stroke-width: 1; stroke-dasharray: 2 8; animation: orb-spin 80s linear infinite; }
+.orb-core .r-ticks { stroke: var(--orb-tone); stroke-opacity: .35; stroke-width: 7; stroke-dasharray: 1.4 8.6;
+  animation: orb-spin 120s linear infinite reverse; }
+.orb-core .r-mid { stroke: var(--orb-tone); stroke-opacity: .6; stroke-width: 2; stroke-dasharray: 84 22 18 22;
+  animation: orb-spin 26s linear infinite reverse; }
+.orb-core .r-sweep { stroke: var(--orb-amber); stroke-width: 3; stroke-linecap: round; stroke-dasharray: 120 609; opacity: 0; }
+/* starts at 12 o'clock; orb.js sets the exact dasharray and drains stroke-dashoffset one count at a time */
+.orb-core .r-count { stroke: var(--orb-red); stroke-width: 4; stroke-linecap: round; stroke-dasharray: 616 1000;
+  stroke-dashoffset: 0; opacity: 0; transform: rotate(-90deg); }
+.orb-core .r-inner { stroke: var(--orb-tone); stroke-width: 1.5; opacity: .85; }
+.orb-core .ripple { stroke: var(--orb-tone); stroke-width: 1.5; opacity: 0; }
+.orb-core .orb-lvl { transform-box: fill-box; transform-origin: 50% 50%; transform: scale(var(--orb-scale, 1));
+  transition: transform .08s linear; }
+.orb-core .r-glow { fill: var(--orb-tone); fill-opacity: var(--orb-glow, 0); stroke: none; }
+.orb-core .r-core { fill: var(--orb-tone); fill-opacity: .14; stroke: var(--orb-tone); stroke-width: 1.5; }
+html[data-theme="dark"] .orb-core .r-core, html[data-theme="dark"] .orb-core .r-mid { filter: drop-shadow(0 0 10px var(--orb-tone)); }
+
+/* ---- phases (data-phase on the button) */
+.orb-btn[data-phase="asleep"] .orb-core, .orb-btn[data-phase="standby"] .orb-core { opacity: .6; }
+.orb-btn[data-phase="asleep"] .r-mid, .orb-btn[data-phase="standby"] .r-mid { animation-duration: 70s; }
+.orb-btn[data-phase="listening"] .r-inner { animation: orb-pulse .7s ease-in-out infinite; }
+.orb-btn[data-phase="listening"] .r-core { animation: orb-pulse 1.1s ease-in-out infinite; fill-opacity: .24; }
+.orb-btn[data-phase="working"] .r-sweep { opacity: 1; animation: orb-spin 1.3s linear infinite; }
+.orb-btn[data-phase="speaking"] .rp1 { animation: orb-ripple 1.8s ease-out infinite; }
+.orb-btn[data-phase="speaking"] .rp2 { animation: orb-ripple 1.8s ease-out .9s infinite; }
+.orb-btn[data-phase="speaking"] .r-core { fill-opacity: .3; }
+.orb-btn[data-phase="approval"] .r-mid { stroke-opacity: .95; animation-duration: 50s; }
+.orb-btn[data-phase="approval"] .r-inner { stroke-dasharray: 4 6; animation: orb-spin 60s linear infinite; }
+.orb-btn[data-phase="countdown"] .r-count { opacity: 1; }
+.orb-btn[data-phase="done"] .r-core { fill-opacity: .22; }
+
+@keyframes orb-spin { to { transform: rotate(360deg); } }
+@keyframes orb-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.07); } }
+@keyframes orb-ripple { 0% { transform: scale(1); opacity: .65; } 100% { transform: scale(2.4); opacity: 0; } }
+
+/* ---- centre: "V", or the countdown number */
+.orb-mid { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
+.orb-mid [hidden] { display: none; }
+.orb-v { font-family: var(--mono, "DM Mono", ui-monospace, monospace); font-size: 28px; line-height: 1;
+  letter-spacing: .2em; padding-left: .2em; color: var(--orb-tone); }
+.orb-num { font-family: var(--mono, "DM Mono", ui-monospace, monospace); font-size: 56px; font-weight: 500; line-height: 1;
+  font-variant-numeric: tabular-nums; color: var(--orb-red); }
+
+@media (max-width: 900px) {
+  .orb-btn { width: 240px; height: 240px; }
+  .orb-num { font-size: 48px; }
+}
+
+/* ---- reduced motion: still rings; the countdown ring shows the fraction left (orb.js), the core ignores the level */
+@media (prefers-reduced-motion: reduce) {
+  .orb-btn, .orb-btn *, .orb-btn *::before, .orb-btn *::after { animation: none !important; transition: none !important; }
+  .orb-core .orb-lvl { transform: none !important; }
+  .orb-core .r-glow { fill-opacity: 0 !important; }
+}

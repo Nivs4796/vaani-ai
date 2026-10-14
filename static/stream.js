@@ -99,12 +99,18 @@
   }
 
   // One attempt at the stream. Returns {result}, {status: 401}, or null (fall back to POST /chat).
-  async function attempt(body, steps) {
+  async function attempt(body, steps, url) {
     const headers = {"Content-Type": "application/json"};
     const me = V.me || readyMe;
     if (me && me.csrf) headers["X-CSRF-Token"] = me.csrf;
-    const res = await fetch("/chat/stream", {method: "POST", headers, credentials: "same-origin", body: JSON.stringify(body)});
+    const res = await fetch(url, {method: "POST", headers, credentials: "same-origin", body: JSON.stringify(body)});
     if (res.status === 401) return {status: 401};
+    if (!res.ok && url === "/voice/turn") {  // a plain JSON refusal (voice mode off, unknown session): say why
+      const j = await res.json().catch(() => ({}));
+      const e = new Error(j.error || `/voice/turn failed (${res.status})`);
+      e.status = res.status;
+      throw e;
+    }
     if (!res.ok || !res.body || !/text\/event-stream/.test(res.headers.get("content-type") || "")) return null;
     let out = null;
     try {
@@ -125,13 +131,17 @@
     return out;
   }
 
+  // opts.path: "/chat" (default; streams through /chat/stream, falls back to POST /chat) or
+  // "/voice/turn" (voice mode, contract v3: already a stream; no fallback, a failure throws).
   V.streamTurn = async (body, opts = {}) => {
     const t0 = performance.now();
     const steps = stepsList(opts.spin);
+    const voice = opts.path === "/voice/turn";
     let out = null;
     try {
-      out = await attempt(body, steps);
+      out = await attempt(body, steps, voice ? "/voice/turn" : "/chat/stream");
     } catch (e) {
+      if (voice) { steps.remove(); throw e; }
       console.warn("Vaani: /chat/stream failed, using /chat", e);
       out = null;
     }
@@ -144,6 +154,7 @@
     }
     if (!out || !out.result || typeof out.result !== "object") {
       steps.remove();
+      if (voice) throw new Error("the voice turn did not answer");
       return V.api("/chat", body);
     }
     steps.collapse(performance.now() - t0);

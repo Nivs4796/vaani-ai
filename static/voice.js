@@ -6,6 +6,10 @@
  * chat turn (via "voice"): the transcript appears as your message, cards appear as usual, and
  * voice never presses a card button. States: idle -> listening -> transcribing -> thinking ->
  * speaking -> idle, announced as "voice:state". Contract: .build/CONTRACT-v2.md (VOICE-CLIENT).
+ *
+ * Voice mode (html.mode-voice, contract v3) belongs to handsfree.js: there this file stays out of
+ * the way (no auto-listen, no spoken turn results, no keys) and only lends the page's one
+ * AudioContext (Vaani.audio) and its decode / level helpers (Vaani.voiceKit).
  */
 "use strict";
 (() => {
@@ -34,7 +38,8 @@ let raf = 0, level = 0;
 
 const csrf = () => (V.me && V.me.csrf) || "";
 const sttReady = () => !!status && status.stt === "ready";
-const handsFreeOn = () => prefs.handsFree && !handsFreePaused && sttReady();
+const voiceMode = () => document.documentElement.classList.contains("mode-voice");
+const handsFreeOn = () => prefs.handsFree && !handsFreePaused && sttReady() && !voiceMode();
 const ttsActive = () => pendingPlays > 0 || !!playing;
 
 function setState(s) {
@@ -170,6 +175,7 @@ function inTextField(t) {
 // Capture phase, so an Esc meant for voice does not also close a drawer underneath.
 function onKey(e) {
   if (!enabled || e.isComposing) return;
+  if (voiceMode() && !rec && !starting) return;     // voice mode: handsfree.js owns Esc and the core
   if (e.key === "Escape") {
     let used = true;
     if (rec || starting || state === "transcribing") cancelListening();
@@ -617,6 +623,15 @@ function renderSettings(container) {
 // ---------------------------------------------------------------- wiring
 V.speak = speak;
 V.stopSpeaking = () => stopSpeaking(false);
+V.audio = audioCtx;
+V.voiceKit = {decode, rms};
+
+// Entering voice mode: the chat mic and any reply being read out stop; handsfree.js takes over.
+V.on("mode:change", e => {
+  if (!e || e.mode !== "voice") return;
+  if (rec || starting || state === "transcribing") cancelListening();
+  if (state === "speaking" || ttsActive()) stopSpeaking();
+});
 
 V.on("brief:shown", e => attachBrief(e && e.el));
 V.on("chat:new", () => { if (briefObs) { briefObs.disconnect(); briefObs = null; } lastBrief = null; if (enabled) stopSpeaking(); });
@@ -632,6 +647,7 @@ V.on("turn:start", e => {
 
 V.on("turn:result", e => {
   if (!enabled || !e || !e.r) return;
+  if (voiceMode() || e.path === "/voice/turn" || e.path === "/voice/commit" || e.path === "/voice/disarm") return;  // handsfree.js speaks these
   const voiced = e.via === "voice";
   if (voiced && skipNext) { skipNext = false; return; }
   if (!((voiced && prefs.speak) || handsFreeOn())) return;

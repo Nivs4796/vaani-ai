@@ -366,7 +366,12 @@ class _Loop:
         session = self.session
         for _round in range(max_rounds):
             t_call = time.perf_counter()
-            resp = llm.complete(session.messages, tools.TOOL_SCHEMAS)
+            msgs = session.messages
+            if obs.current_mode.get() == "voice":  # voice mode: a shorter transcript, faster answers
+                from assistant import voicectx
+
+                msgs = voicectx.trim(msgs)
+            resp = llm.complete(msgs, tools.TOOL_SCHEMAS)
             call_ms = int((time.perf_counter() - t_call) * 1000)
             msg = resp.message
             content = (msg.content or "").strip()

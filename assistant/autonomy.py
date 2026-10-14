@@ -45,7 +45,10 @@ REVERSIBLE = frozenset({"archive", "mark_read", "label", "unarchive", "mark_unre
 NEVER_AUTO = frozenset({"trash", "untrash"})
 # "undo": the Undo button on a receipt carried out the opposite change; like "policy", it is
 # no evidence for the streak either way (the undo_applied row is what ends the streak).
-CONFIRMERS = ("user", "inline", "policy", "undo")
+# "voice": a spoken approval in voice mode (voice_policy.py); it counts like a click.
+CONFIRMERS = ("user", "inline", "policy", "undo", "voice")
+# Confirmers whose clean approvals build the promotion streak: the user's own decision.
+USER_CONFIRMERS = ("user", "inline", "voice")
 # The opposite mailbox change for Undo. Label changes are left out: the brief's triage cards
 # never set a label, and an unlabel needs the label name.
 INVERSE = {"archive": "unarchive", "unarchive": "archive", "mark_read": "mark_unread", "mark_unread": "mark_read",
@@ -62,7 +65,9 @@ DRAFT_TAGS = ("workflow", "origin", "proposed_hash", "edited", "revision_of", "d
 _CONTENT_KEYS = ("to", "cc", "subject", "body", "thread_id", "action", "ids", "label_name", "target_event_id",
                  "patch", "response", "summary", "start", "end", "attendees", "description")
 PROOF_KEYS = ("ts", "workflow", "tool", "card_kind", "confirmed_by", "edited", "verified", "ok", "ms", "level")
-_PROOF_EXTRA = ("origin", "draft_id", "variant", "decision", "from_level", "to_level", "by", "reason", "streak", "error")
+_PROOF_EXTRA = ("origin", "draft_id", "variant", "decision", "from_level", "to_level", "by", "reason", "streak", "error",
+                "heard", "stt_conf")  # heard / stt_conf: what a voice approval heard, and the speech model's confidence
+PROOF_EXTRA = _PROOF_EXTRA
 
 _offers_logged: set[tuple] = set()
 _offers_lock = threading.Lock()
@@ -308,18 +313,18 @@ def _streak(rows: list[dict], workflow: str, snoozed_at) -> int:
     for row in rows:
         if row.get("workflow") != workflow:
             continue
+        tool = row.get("tool")
+        if tool in RESET_TOOLS:  # always, even when stamped in the same millisecond as the snooze
+            n = 0
+            continue
         if since is not None:
             t = _parse_ts(row.get("ts"))
             if t is None or t <= since:
                 continue
-        tool = row.get("tool")
-        if tool in RESET_TOOLS:
-            n = 0
-            continue
         if not _is_commit_row(row) or row.get("confirmed_by") in ("policy", "undo"):
             continue  # Auto's own writes, and Undo's, prove nothing about the user's trust
         clean = (row.get("ok") is True and row.get("verified") is True and not row.get("edited")
-                 and row.get("confirmed_by") in ("user", "inline"))
+                 and row.get("confirmed_by") in USER_CONFIRMERS)
         n = n + 1 if clean else 0
     return n
 

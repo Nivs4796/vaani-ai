@@ -1,0 +1,192 @@
+/* hud.css: the voice-mode HUD (hud.js builds the DOM; contract .build/CONTRACT-v3.md).
+ * Defines the --hud-* tokens on #hud (light default, dark via html[data-theme="dark"]); CORE's
+ * orb uses them. MODE shows and hides #hud with html.mode-voice / html.mode-chat, so nothing
+ * here sets display: none on #hud. Orb internals are CORE's (orb.css).
+ * One change from the contract table: light --hud-green is #2A7449 (not #2E7D4F), because
+ * #2E7D4F is 4.48:1 on --hud-bg and 4.2:1 on the log panel, below the 4.5:1 text minimum.
+ */
+
+#hud {
+  --hud-acc: #0B7285;
+  --hud-bg: #F4F1EB;
+  --hud-bg2: #ECE8DF;
+  --hud-panel: #FFFFFF;
+  --hud-line: rgba(26,25,22,.12);
+  --hud-line2: rgba(26,25,22,.26);
+  --hud-text: #1A1916;
+  --hud-muted: #5F5C55;
+  --hud-amber: #8A5A00;
+  --hud-red: #B42318;
+  --hud-green: #2A7449;
+  --hud-grid: rgba(26,25,22,.035);
+  --hud-tone: var(--hud-acc);
+  display: flex; flex-direction: column;
+  height: 100vh; height: 100dvh; overflow: hidden;
+  background-color: var(--hud-bg); color: var(--hud-text);
+  background-image: linear-gradient(var(--hud-grid) 1px, transparent 1px), linear-gradient(90deg, var(--hud-grid) 1px, transparent 1px);
+  background-size: 44px 44px;
+  font: 15px/1.5 var(--font);
+}
+html[data-theme="dark"] #hud {
+  --hud-acc: #4FD8FF;
+  --hud-bg: #070B12;
+  --hud-bg2: #0A1019;
+  --hud-panel: rgba(110,190,255,.05);
+  --hud-line: rgba(120,205,255,.16);
+  --hud-line2: rgba(120,205,255,.34);
+  --hud-text: #DCEAF4;
+  --hud-muted: #8DA3B5;
+  --hud-amber: #F5B544;
+  --hud-red: #FF6B5E;
+  --hud-green: #5FD38D;
+  --hud-grid: rgba(120,205,255,.045);
+  color-scheme: dark;
+}
+#hud[data-phase="working"], #hud[data-phase="approval"] { --hud-tone: var(--hud-amber); }
+#hud[data-phase="countdown"] { --hud-tone: var(--hud-red); }
+#hud[data-phase="done"] { --hud-tone: var(--hud-green); }
+
+#hud *, #hud *::before, #hud *::after { box-sizing: border-box; }
+#hud [hidden] { display: none !important; }
+#hud :focus-visible { outline: 2px solid var(--hud-acc); outline-offset: 2px; }
+#hud h1, #hud p { margin: 0; }
+
+/* ---------------------------------------------------------------- header */
+#hud .hud-top { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 10px 24px; border-bottom: 1px solid var(--hud-line); }
+#hud .hud-brand { display: flex; align-items: baseline; gap: 10px; font-family: var(--mono); font-size: 14px; letter-spacing: .26em; white-space: nowrap; }
+#hud .hud-sub { color: var(--hud-tone); font-size: 11px; letter-spacing: .2em; }
+#hud .hud-right { display: flex; align-items: center; gap: 4px; }
+#hud .hud-clock { margin-right: 10px; font-family: var(--mono); font-size: 12px; letter-spacing: .12em; color: var(--hud-muted); white-space: pre; }
+#hud .hud-icon { display: inline-grid; place-items: center; width: 44px; height: 44px; min-height: 44px; padding: 0;
+  border: 1px solid transparent; border-radius: 999px; background: transparent; color: var(--hud-muted); cursor: pointer;
+  transition: border-color .15s ease, color .15s ease; }
+#hud .hud-icon:hover { border-color: var(--hud-line2); background: transparent; color: var(--hud-text); }
+#hud .hud-icon[aria-pressed="true"] { color: var(--hud-text); border-color: var(--hud-line2); }
+
+/* ---------------------------------------------------------------- layout */
+#hud .hud-main { flex: 1; min-height: 0; display: flex; }
+#hud .hud-stage { position: relative; flex: 1 1 600px; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 16px;
+  padding: 20px 28px 16px; overflow: auto; }
+#hud[data-phase="asleep"] .hud-stage { overflow: hidden; }
+#hud .stage-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 28px; }
+#hud .side { flex: 1 1 220px; max-width: 290px; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+#hud .core-wrap { flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+#hud .orb-mount { position: relative; width: 300px; height: 300px; display: grid; place-items: center; }
+#hud .hud-state { min-height: 18px; font-family: var(--mono); font-size: 12px; letter-spacing: .2em; color: var(--hud-tone); text-align: center; }
+
+/* ---------------------------------------------------------------- panels (corner brackets in the phase tone) */
+#hud .hud-panel { position: relative; padding: 14px 16px; background: var(--hud-panel); border: 1px solid var(--hud-line); }
+#hud .hud-panel::before, #hud .hud-panel::after { content: ""; position: absolute; width: 10px; height: 10px; border: solid var(--hud-tone); opacity: .85; }
+#hud .hud-panel::before { top: -1px; left: -1px; border-width: 1px 0 0 1px; }
+#hud .hud-panel::after { bottom: -1px; right: -1px; border-width: 0 1px 1px 0; }
+#hud .p-h { margin-bottom: 6px; font-family: var(--mono); font-size: 11px; letter-spacing: .18em; color: var(--hud-muted); }
+#hud .p-big { font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
+#hud .p-sub { font-size: 13px; color: var(--hud-muted); }
+#hud .p-list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 5px; font-size: 13px; }
+#hud .p-list li { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#hud .p-list .mono { margin-right: 8px; font-family: var(--mono); font-size: 12px; color: var(--hud-muted); }
+#hud .p-row { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; font-size: 13px; border-bottom: 1px solid var(--hud-line); }
+#hud .p-row:last-child { border-bottom: 0; }
+#hud .p-row .k { color: var(--hud-muted); }
+#hud .p-row > span:last-child { text-align: right; overflow-wrap: anywhere; }
+#hud .p-row .live { font-family: var(--mono); font-size: 12px; color: var(--hud-tone); }
+#hud .unread { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--hud-acc); vertical-align: 2px; }
+#hud .hud-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+#hud .hud-chip { padding: 2px 8px; font-family: var(--mono); font-size: 11px; color: var(--hud-muted); border: 1px solid var(--hud-line2); border-radius: 999px; white-space: nowrap; }
+
+/* ---------------------------------------------------------------- heard, caption, idle */
+#hud .talk { width: 100%; max-width: 760px; min-height: 72px; margin: 0 auto; display: flex; flex-direction: column; gap: 6px; text-align: center; }
+#hud .heard { font-family: var(--mono); font-size: 14px; color: var(--hud-muted); overflow-wrap: anywhere; }
+#hud .heard.ignored { text-decoration: line-through; text-decoration-color: var(--hud-line2); }
+#hud .caption { font-size: 21px; line-height: 1.45; font-weight: 500; overflow-wrap: anywhere; }
+#hud .idle { font-size: 15px; color: var(--hud-muted); }
+
+/* ---------------------------------------------------------------- focus card (brackets in the card's own tone) */
+#hud .hud-focus { width: 100%; }
+#hud .hud-card { position: relative; width: 100%; max-width: 640px; margin: 0 auto; padding: 16px 20px;
+  background: var(--hud-panel); border: 1px solid var(--hud-line2); overflow-wrap: anywhere; }
+#hud .hud-card::before, #hud .hud-card::after { content: ""; position: absolute; width: 14px; height: 14px; border: solid var(--hud-tone); }
+#hud .hud-card::before { top: -1px; left: -1px; border-width: 2px 0 0 2px; }
+#hud .hud-card::after { bottom: -1px; right: -1px; border-width: 0 2px 2px 0; }
+#hud .hud-card.ct-acc { --hud-tone: var(--hud-acc); }
+#hud .hud-card.ct-amber { --hud-tone: var(--hud-amber); border-color: var(--hud-amber); }
+#hud .hud-card.ct-red { --hud-tone: var(--hud-red); border-color: var(--hud-red); }
+#hud .hud-card.ct-green { --hud-tone: var(--hud-green); border-color: var(--hud-green); }
+#hud .c-label { margin-bottom: 6px; font-family: var(--mono); font-size: 11px; letter-spacing: .18em; color: var(--hud-tone); }
+#hud .c-title { font-size: 17px; font-weight: 600; }
+#hud .c-sub { font-size: 13px; color: var(--hud-muted); }
+#hud .c-quote { margin-top: 8px; font-size: 15px; }
+#hud .say-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+#hud .say-k { font-family: var(--mono); font-size: 11px; letter-spacing: .18em; color: var(--hud-muted); }
+#hud .say { padding: 3px 10px; font-family: var(--mono); font-size: 12px; color: var(--hud-tone); border: 1px solid var(--hud-tone); border-radius: 999px; }
+#hud .c-fine { margin-top: 10px; font-family: var(--mono); font-size: 11px; color: var(--hud-muted); }
+
+/* ---------------------------------------------------------------- foot */
+#hud .stage-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-top: auto; }
+#hud .hint { font-family: var(--mono); font-size: 12px; color: var(--hud-muted); }
+#hud .hud-end { min-height: 44px; padding: 0 18px; font-size: 13px; font-weight: 500; color: var(--hud-text);
+  background: transparent; border: 1px solid var(--hud-line2); border-radius: 999px; cursor: pointer; transition: border-color .15s ease; }
+#hud .hud-end:hover { background: transparent; border-color: var(--hud-tone); }
+
+/* ---------------------------------------------------------------- wake overlay (phase "asleep") */
+#hud .hud-wake { position: absolute; inset: 0; z-index: 5; display: grid; place-items: center; padding: 24px;
+  background: var(--hud-bg); background: color-mix(in srgb, var(--hud-bg) 92%, transparent); }
+#hud .wake-in { max-width: 460px; display: flex; flex-direction: column; align-items: center; gap: 16px; text-align: center; }
+#hud .wake-btn { width: 184px; height: 184px; min-height: 0; padding: 0; border-radius: 50%; border: 1px solid var(--hud-acc);
+  background: transparent; color: var(--hud-acc); font-family: var(--mono); font-size: 13px; font-weight: 400; letter-spacing: .18em; cursor: pointer;
+  box-shadow: 0 0 0 10px var(--hud-panel), 0 0 0 11px var(--hud-line2); transition: background-color .15s ease; }
+#hud .wake-btn:hover { background: var(--hud-panel); border-color: var(--hud-acc); }
+#hud .wake-btn:focus-visible { outline-offset: 14px; }
+#hud .hud-wake h1 { font-size: 24px; font-weight: 600; }
+#hud .hud-wake p { font-size: 14px; color: var(--hud-muted); }
+
+/* ---------------------------------------------------------------- comms log */
+#hud .hud-log { flex: 0 1 30%; min-width: 300px; min-height: 0; display: flex; flex-direction: column;
+  border-left: 1px solid var(--hud-line); background: var(--hud-bg2); background: color-mix(in srgb, var(--hud-bg2) 75%, transparent); }
+#hud .log-h { flex: none; display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 16px 20px 10px;
+  font-family: var(--mono); font-size: 11px; letter-spacing: .18em; color: var(--hud-muted); border-bottom: 1px solid var(--hud-line); }
+#hud .log-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 20px 20px; scrollbar-width: thin; scrollbar-color: var(--hud-line2) transparent; }
+#hud .log-empty { margin: 16px 0; font-size: 14px; color: var(--hud-muted); }
+#hud .entry { display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--hud-line);
+  animation: hud-in .25s ease both; }
+#hud .e-time { padding-top: 2px; font-family: var(--mono); font-size: 11px; color: var(--hud-muted); }
+#hud .e-who { font-family: var(--mono); font-size: 11px; letter-spacing: .16em; color: var(--hud-muted); }
+#hud .who-vaani .e-who { color: var(--hud-acc); }
+#hud .e-text { margin-top: 2px; font-size: 14px; overflow-wrap: anywhere; }
+#hud .e-tag { display: inline-block; margin-top: 6px; padding: 2px 8px; font-family: var(--mono); font-size: 11px; letter-spacing: .06em;
+  border: 1px solid currentColor; border-radius: 999px; }
+#hud .tone-green { color: var(--hud-green); }
+#hud .tone-amber { color: var(--hud-amber); }
+#hud .tone-red { color: var(--hud-red); }
+@keyframes hud-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+/* ---------------------------------------------------------------- narrow: the log moves below the stage; #hud scrolls itself */
+@media (max-width: 900px) {
+  #hud { overflow-y: auto; }
+  #hud .hud-top { padding: 8px 12px; gap: 8px; }
+  #hud .hud-clock { display: none; }
+  #hud .hud-main { flex: none; flex-direction: column; }
+  #hud .hud-stage { flex: none; overflow: visible; padding: 16px; }
+  #hud .stage-top { gap: 16px; }
+  #hud .core-wrap { order: -1; flex-basis: 100%; }
+  #hud .side { flex: 1 1 260px; max-width: none; }
+  #hud .orb-mount { width: 240px; height: 240px; }
+  #hud .hud-wake { place-items: start center; padding-top: 12vh; }
+  #hud .hud-log { flex: none; min-width: 0; border-left: 0; border-top: 1px solid var(--hud-line); }
+  #hud .log-list { max-height: 420px; }
+  #hud .log-h { padding: 14px 16px 10px; }
+  #hud .log-list { padding: 4px 16px 16px; }
+}
+@media (max-width: 420px) {
+  #hud .hud-brand { gap: 6px; letter-spacing: .18em; }
+  #hud .caption { font-size: 19px; }
+}
+@media (max-width: 360px) {
+  #hud .hud-sub { display: none; }  /* the header fits the mode toggle and icons at phone width */
+}
+
+/* ---------------------------------------------------------------- reduced motion (the orb is CORE's own) */
+@media (prefers-reduced-motion: reduce) {
+  #hud *:not(#orbMount *), #hud *:not(#orbMount *)::before, #hud *:not(#orbMount *)::after { animation: none !important; transition: none !important; }
+}

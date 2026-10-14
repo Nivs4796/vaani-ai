@@ -24,6 +24,7 @@ import base64
 import email.utils
 import html
 import json
+import os
 import re
 import secrets
 from datetime import date, datetime, timedelta
@@ -233,9 +234,55 @@ def draft_email(to=None, subject="", body="", cc=None, reply_to_message_id="", f
         draft = _new_pending(session, "email_send", card, to=to_list, cc=cc_list, subject=subj, body=text,
                              thread_id=thread_id, in_reply_to=in_reply_to, references=references, mode=mode,
                              source_message_id=reply_mid or fwd_mid or None)
+        # A display name for voice read-backs ("Here's the reply to Ravi"); never used to send.
+        draft["to_name"] = _display_name(hdr.get("from", "") if mode == "reply" else "", to, to_list, data)
         return _prepared(draft)
     except Exception as e:
         return _error(f"could not draft the email ({type(e).__name__}: {e})", "try again")
+
+
+def _display_name(from_header: str, given, to_list: list[str], data: dict) -> str:
+    """A person's name for voice read-backs: the replied-to sender's display name, a name the
+    request gave ("Sam Lee <sam.lee@example.org>"), a saved contact, or ""."""
+    disp = email.utils.parseaddr(from_header or "")[0]
+    if not disp:
+        for raw in _as_list_keep(given):
+            name, addr = email.utils.parseaddr(raw)
+            if name:
+                disp = name
+                break
+            if raw and "@" not in raw:
+                disp = raw
+                break
+    if not disp and to_list:
+        want = to_list[0].lower()
+        disp = next((str(c.get("name") or "") for c in data.get("contacts", []) or []
+                     if isinstance(c, dict) and str(c.get("email") or "").lower() == want), "")
+    disp = re.sub(r"\s*\([^)]*\)", "", disp or "")  # "Ravi Mehta (Basecamp)" -> "Ravi Mehta"
+    return " ".join(disp.replace('"', "").split())[:60]
+
+
+def draft_send_saved(prev: dict, session=None) -> dict | None:
+    """After a verified voice "confirm" saved an email to Gmail drafts: a new pending email_send
+    card that sends THAT saved draft (Gmail drafts.send). Same recipients, subject, body and
+    thread as the card it came from. Called by code only (voice_policy.py), never a model tool;
+    it is an ordinary card behind the same gate. None when there is no verified saved draft."""
+    session = session or _session()
+    done = (prev or {}).get("committed") or {}
+    gid = done.get("gmail_draft_id")
+    if session is None or not gid or done.get("status") != "SAVED_DRAFT" or not done.get("verified"):
+        return None
+    who = prev.get("to_name") or ", ".join(prev.get("to") or [])
+    lines = [f"To: {', '.join(prev.get('to') or [])}"] + ([f"Cc: {', '.join(prev['cc'])}"] if prev.get("cc") else []) \
+        + [f"Subject: {prev.get('subject')}"]
+    card = _card("Send the saved draft", lines, "Send", f"It is saved in your Gmail drafts. Nothing has been sent yet; Send sends it to {who}.",
+                 body=prev.get("body"), alt=None)
+    return _new_pending(session, "email_send", card, origin=prev.get("origin"), to=list(prev.get("to") or []),
+                        cc=list(prev.get("cc") or []), subject=prev.get("subject"), body=prev.get("body"),
+                        thread_id=prev.get("thread_id"), in_reply_to=prev.get("in_reply_to"),
+                        references=prev.get("references"), mode=prev.get("mode"),
+                        source_message_id=prev.get("source_message_id"), gmail_draft_id=gid,
+                        to_name=prev.get("to_name") or "", saved_from=prev.get("draft_id"))
 
 
 @logged
@@ -294,6 +341,7 @@ def draft_nudge(message_id: str = "", body: str = "") -> str:
         draft = _new_pending(session, "email_send", card, origin="followup", to=to_list, cc=cc_list, subject=subj, body=text,
                              thread_id=msg.get("threadId"), in_reply_to=in_reply_to, references=references, mode="nudge",
                              source_message_id=mid)
+        draft["to_name"] = _display_name(hdr.get("to", ""), None, to_list, data)
         return _prepared(draft)
     except Exception as e:
         return _error(f"could not draft the follow-up ({type(e).__name__}: {e})", "try again")
@@ -575,7 +623,8 @@ def draft_event_change(action="update", event_id="", event_query="", on_date="",
         if act == "delete":
             card = _card("Delete event", lines, "Delete event",
                          "Nothing has changed yet. It moves to Google Calendar's trash; guests are not emailed.", danger=True)
-            draft = _new_pending(session, "event_delete", card, target_event_id=ev["id"], summary=summary)
+            draft = _new_pending(session, "event_delete", card, target_event_id=ev["id"], summary=summary, attendees=attendees,
+                                 when_iso=(ev.get("start") or {}).get("dateTime") or (ev.get("start") or {}).get("date"))
             return _prepared(draft)
         if act == "rsvp":
             response = _RSVP.get((_str(rsvp) or word).strip().lower())
@@ -588,7 +637,8 @@ def draft_event_change(action="update", event_id="", event_query="", on_date="",
                 return _error("the user is not on this event's guest list", "ask which event they meant")
             card = _card(f"Answer invite: {response}", lines, response.capitalize(),
                          "Nothing has changed yet. The organiser sees your answer on their calendar; no email is sent.")
-            draft = _new_pending(session, "event_rsvp", card, target_event_id=ev["id"], response=response, summary=summary)
+            draft = _new_pending(session, "event_rsvp", card, target_event_id=ev["id"], response=response, summary=summary,
+                                 when_iso=(ev.get("start") or {}).get("dateTime") or (ev.get("start") or {}).get("date"))
             return _prepared(draft)
         # update
         if "dateTime" not in (ev.get("start") or {}):
@@ -627,7 +677,9 @@ def draft_event_change(action="update", event_id="", event_query="", on_date="",
             change_lines.append(f"Guests: {', '.join(attendees)}")
         card = _card("Change event", change_lines, "Save change",
                      "Nothing has changed yet." + (" Guests are not emailed about the change." if attendees else ""))
-        draft = _new_pending(session, "event_update", card, target_event_id=ev["id"], patch=patch, summary=patch.get("summary", summary))
+        draft = _new_pending(session, "event_update", card, target_event_id=ev["id"], patch=patch, summary=patch.get("summary", summary),
+                             attendees=attendees, old_summary=summary,
+                             when_iso=(patch.get("start") or {}).get("dateTime") or (ev.get("start") or {}).get("dateTime"))
         return _prepared(draft)
     except Exception as e:
         return _error(f"could not prepare the event change ({type(e).__name__}: {e})", "try again")
@@ -715,6 +767,21 @@ def _commit_email(draft: dict, variant: str) -> dict:
     if attempts and variant != "save_draft":
         # A send is not idempotent: never risk a second copy after an unclear first attempt.
         raise RuntimeError("an earlier send attempt for this card did not finish cleanly; check your Sent folder, then ask me to draft it again")
+    if draft.get("gmail_draft_id"):
+        # The saved-draft send card (draft_send_saved): send exactly the draft already in Gmail.
+        if variant == "save_draft":
+            raise RuntimeError("this email is already saved in your Gmail drafts; send it, or leave it there")
+        draft["send_attempts"] = attempts + 1
+        sent = gmail.users().drafts().send(userId="me", body={"id": draft["gmail_draft_id"]}).execute()  # deliberately no retries
+        draft["sent_id"] = sent.get("id")
+        try:
+            got = gmail.users().messages().get(userId="me", id=sent.get("id"), format="minimal").execute(num_retries=2)
+            ok = "SENT" in (got.get("labelIds") or [])
+        except Exception:
+            ok = False
+        return {"status": "SENT", "verified": ok, "message_id": sent.get("id"), "thread_id": sent.get("threadId"),
+                "report": [f"Sent{' and verified in your Sent folder' if ok else ' (could not read it back from Sent; check there)'}: {draft['subject']}",
+                           f"To: {', '.join(draft['to'])}" + (f"  Cc: {', '.join(draft['cc'])}" if draft.get("cc") else "")]}
     msg = EmailMessage()
     msg["From"] = base._own_address()
     msg["To"] = ", ".join(draft["to"])
@@ -831,6 +898,11 @@ def _commit_event(draft: dict) -> dict:
                        f"When: {_event_when(got, tz)}", "No guest was emailed."]}
 
 
+def block_send() -> bool:
+    """VAANI_BLOCK_SEND=1 (read at call time): commit_pending refuses every real send; saving to drafts still works."""
+    return os.environ.get("VAANI_BLOCK_SEND", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
 COMMIT_KINDS = ("email_send", "email_modify", "event_create", "event_update", "event_delete", "event_rsvp")
 
 
@@ -857,6 +929,8 @@ def commit_pending(draft_id="", variant="") -> str:
             return base._already_created(draft)  # idempotent: never create twice for one draft
         if draft.get("status") != "DRAFT":
             return _error(f"card {did} is {str(draft.get('status')).lower()}", "ask the user to confirm the latest card")
+        if kind == "email_send" and _str(variant) != "save_draft" and block_send():
+            return "ERROR: sending is switched off on this server (VAANI_BLOCK_SEND=1); nothing was sent"
         if getattr(session, "confirmed_draft_id", None) != did:
             return f"NOT DONE: waiting for the user to confirm card {did}"
         session.confirmed_draft_id = None  # one click authorises one attempt
@@ -867,6 +941,13 @@ def commit_pending(draft_id="", variant="") -> str:
         decision = autonomy.commit_fields(draft, _str(variant))
         draft["confirmed_by"] = decision["confirmed_by"]
         obs.annotate(**decision, verified=False)
+        if decision["confirmed_by"] == "voice":
+            heard = obs.current_voice.get() or {}
+            try:
+                conf = round(float(heard.get("confidence")), 2)
+            except (TypeError, ValueError):
+                conf = None
+            obs.annotate(heard=str(heard.get("heard") or "")[:80], stt_conf=conf)
         if kind == "event_create":
             try:
                 return base._insert_confirmed_event(session, draft)
