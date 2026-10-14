@@ -14,12 +14,17 @@ A chat assistant that manages one account's real Gmail and Google Calendar, driv
 
 **Brief first.** A new chat opens with the inbox brief already built in code (Needs a reply, Follow-ups, Worth knowing, Updates, Promotions) and stamped "built X ago, covers N days". Follow-ups are sent conversations still waiting on the other person; the Nudge button drafts a reply in the same thread, behind the same confirm step.
 
+**Voice, on this Mac.** The mic button in the message box (or Ctrl+Shift+Space) records one question, stops after a short silence, and sends it to `POST /voice/stt`, where faster-whisper `small.en` transcribes it on the CPU (about 0.7 s warm; the GPU stays free for the model). The transcript goes through the normal chat path, so every rule here still applies: a spoken "yes" never approves a card (Vaani points at the button), and anything you ask for, typed or spoken, waits for your tap even at Auto. Replies to spoken questions are read aloud with a macOS voice (`say` rendered to WAV by `POST /voice/tts` and played in the page); tap the mic or press Esc to cut it off. Audio is never written to disk and never leaves the laptop. Settings > Voice picks the voice (default Samantha) and turns on hands-free mode.
+
+**Look and feel.** A cream "paper" theme (light by default, dark from the header toggle), a side menu with Today's meetings, Follow-ups, Drafts saved and History (past chats grouped by day, stored encrypted in `data/vaani.db`), live steps while a turn runs ("Reading your inbox…", streamed by `POST /chat/stream`; the reply text is only sent after every guard has run), Copy / Regenerate / Helpful / Not helpful under replies, and full-page Settings (Autonomy, Proof, Account, Voice).
+
 **Accounts.** With `VAANI_AUTH=google`, the first "Sign in with Google" creates a Vaani account for that Google user (same Gmail and Calendar permissions as below, plus basic profile). Each user has their own memory, Google token (encrypted at rest) and logs; the server takes the user only from a signed session cookie. `VAANI_AUTH=single` (the default) is today's one-user `token.json` mode.
 
 ## Prerequisites
 
 - Ollama running (`ollama serve`) with `ollama pull qwen2.5:7b`
 - Python 3.12 and a venv at `.venv` (`python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt`)
+- Voice: `requirements.txt` pins `faster-whisper==1.2.1` with `av>=18,<19` (PyAV 19 breaks faster-whisper 1.2.1's decoder). Download the speech model once with `.venv/bin/python -c "from faster_whisper import WhisperModel; WhisperModel('small.en', device='cpu', compute_type='int8')"` (486 MB, Hugging Face cache); the server then loads it with `local_files_only`, so it makes no network call. `VAANI_VOICE=0` turns voice off; `VAANI_STT_MODEL=base.en` is the faster, smaller fallback.
 - `credentials.json` (Desktop OAuth client, Gmail API + Calendar API enabled, Testing consent screen with this account as a test user) in the project root; `.env` with `OLLAMA_MODEL=qwen2.5:7b`, `OLLAMA_KEEP_ALIVE=2h`, `OLLAMA_TIMEOUT=120`, `OLLAMA_NUM_CTX=8192`, `OLLAMA_NUM_PREDICT=768`
 
 ## Setup and re-auth
@@ -40,10 +45,11 @@ Testing-mode refresh tokens expire after 7 days. `google_auth.py` catches the `R
 - Undo and step-back: a carried-out mailbox change (archive, read, star, trash and their opposites) has an Undo button on its receipt; Undo ends that workflow's streak and steps an Auto workflow down to One-tap. Two skipped cards in a row at One-tap or Auto bring a "step back?" offer. `VAANI_NUDGE_MODEL=1` lets the local model rewrite nudge text; code keeps the template when the rewrite fails its checks.
 - All offline suites at once: `python -m evals.all` (writes `data/eval_status.json`, which the Proof panel shows as "Offline checks: N of M passing").
 - Evals: `.venv/bin/python -m evals.run` (11 prompt-to-expected-tool cases; reads your real mail and calendar but can never confirm a card)
-- Offline checks, no model and no Google: `python -m evals.test_manage` (write actions against a fake Gmail and Calendar), `evals.test_guard`, `evals.test_attendees`, `evals.test_inbox`, `evals.test_auth` (sign-in, sessions, CSRF, user isolation), `evals.test_autonomy` (the ladder), `evals.test_promotion` (streaks and offers), `evals.test_brief`, `evals.test_followups`. They pin every `VAANI_*` flag to its default and log to a temp folder, so `.env` and `logs/` never affect them.
+- Offline checks, no model and no Google: `python -m evals.test_manage` (write actions against a fake Gmail and Calendar), `evals.test_guard`, `evals.test_attendees`, `evals.test_inbox`, `evals.test_auth` (sign-in, sessions, CSRF, user isolation), `evals.test_autonomy` (the ladder), `evals.test_promotion` (streaks and offers), `evals.test_brief`, `evals.test_followups`, `evals.test_stream` (live steps), `evals.test_history`, `evals.test_rail` (meetings and drafts sections), `evals.test_voice` (spoken text rules, routes, and a real `say` -> transcript round trip when the model is cached). They pin every `VAANI_*` flag to its default and log to a temp folder, so `.env` and `logs/` never affect them.
 - Smoke test: `.venv/bin/python -m spike.smoke_core` (full Andy flow; creates and deletes one test event)
 - Demo smoke test: `.venv/bin/python spike/smoke_demo.py` (brief on open, Reply summary, a nudge and a triage card that are skipped, three drafts saved to your own address to earn a promotion offer, Proof rows; nothing is sent and no mailbox change is made)
-- Logs: `logs/tools.jsonl` (one line per tool call), `logs/turns.jsonl` (one line per model call)
+- Voice latency check: `.venv/bin/python spike/smoke_voice.py` (warms the model, times transcription of the test clips in `static/test/` and one spoken reply)
+- Logs: `logs/tools.jsonl` (one line per tool call), `logs/turns.jsonl` (one line per model call), `logs/feedback.jsonl` (Helpful / Not helpful)
 
 ## Demo prompts, in order
 

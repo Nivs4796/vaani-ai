@@ -1,0 +1,21 @@
+/* rail.css: item styling inside Vaani's own rail sections (owner: RAIL; see static/rail.js).
+   SHELL builds the card: .rail-sec[data-id] > .rail-sec-body > .rail-list > li > .rail-item
+   with .ri-main (.ri-title, .ri-sub) and .ri-meta. Only the contract's tokens are used here. */
+
+/* Today's meetings: the time range leads the row, in mono, so the titles line up. */
+.rail-sec[data-id="meetings"] .ri-meta { order: -1; min-width: 74px; font: 500 11.5px/18px var(--mono); color: var(--ink-2);
+  font-variant-numeric: tabular-nums; }
+.rail-sec[data-id="meetings"] .ri-title { font-weight: 500; }
+
+/* Follow-ups: how long they have waited reads as pending (--warn). */
+.rail-sec[data-id="followups"] .ri-sub { color: var(--warn); }
+
+/* Drafts saved: subject first, recipient under it, saved time on the right. */
+.rail-sec[data-id="drafts"] .ri-meta { font-variant-numeric: tabular-nums; }
+
+/* A row with nothing to open stays quiet. */
+.rail-sec[data-id="meetings"] .rail-item.static,
+.rail-sec[data-id="drafts"] .rail-item.static { cursor: default; }
+
+/* Vaani.icons (rail.js) for anyone who places them. */
+.vi { flex: none; display: block; }

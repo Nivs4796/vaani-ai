@@ -1,0 +1,91 @@
+/* Inbox brief (BRIEF): an open page at the top of the thread, not a boxed card (Maaya look).
+   Greeting, TODAY line, hairline, built stamp, then accordion groups split by hairlines.
+   Contract tokens only (.build/CONTRACT-v2.md); every class is bf-* except the two the contract names. */
+
+.bf-brief { max-width: 640px; margin: 8px 0 28px; color: var(--ink); font: 15px/1.5 var(--font); }
+.bf-brief:focus { outline: none; }
+.bf-brief [hidden] { display: none !important; }
+.bf-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* ---------------------------------------------------------------- greeting, today, stamp */
+.bf-brief .brief-greeting { display: inline; margin: 0; font: 600 18px/1.45 var(--font); letter-spacing: -.01em; color: var(--ink); }
+.bf-brief .brief-voice-slot { display: inline-flex; align-items: center; vertical-align: middle; margin-left: 8px; }
+.bf-brief .brief-voice-slot:empty { display: none; }
+
+.bf-today { margin-top: 20px; }
+.bf-kicker { margin: 0 0 4px; font: 500 11px/16px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.bf-today-line { margin: 0; color: var(--muted); }
+.bf-err { margin: 0; font-size: 14px; color: var(--risk); }
+.bf-stamp + .bf-err { margin: -4px 0 8px; }
+
+.bf-rule { height: 0; margin: 18px 0 10px; border-top: 1px solid var(--line); }
+.bf-stamp { margin: 0 0 8px; font: 400 12px/18px var(--mono); color: var(--faint); }
+.bf-brief.stale .bf-stamp, .bf-brief.stale .bf-stamp button.bf-refresh { color: var(--warn); }
+
+.bf-brief button.bf-link { min-height: 0; padding: 0; border: 0; border-radius: 0; background: none; font: inherit; color: var(--ink-2);
+  text-decoration: underline; text-decoration-color: var(--line-3); text-underline-offset: 3px; cursor: pointer; }
+.bf-brief button.bf-link:hover:not(:disabled) { background: none; color: var(--ink); text-decoration-color: currentColor; }
+.bf-empty-all { margin: 14px 0 0; color: var(--muted); }
+
+/* ---------------------------------------------------------------- accordion groups */
+.bf-groups { margin-top: 10px; border-bottom: 1px solid var(--line); }
+.bf-group { border-top: 1px solid var(--line); }
+.bf-brief button.bf-head { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 48px; padding: 12px 4px;
+  border: 0; border-radius: 0; background: none; color: var(--ink); font: 500 15px/1.4 var(--font); text-align: left; cursor: pointer; }
+.bf-brief button.bf-head:hover:not(:disabled) { background: none; border-color: transparent; }
+.bf-brief button.bf-head:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
+.bf-count { min-width: 24px; font: 500 13px/1 var(--mono); font-variant-numeric: tabular-nums; color: var(--muted); }
+.bf-label { flex: 1; min-width: 0; }
+.bf-group.is-empty .bf-count, .bf-group.is-empty .bf-label { color: var(--faint); }
+.bf-chev { flex: none; width: 7px; height: 7px; margin-right: 6px; border-right: 1.5px solid var(--faint); border-bottom: 1.5px solid var(--faint);
+  transform: translateY(-2px) rotate(45deg); transition: transform var(--dur) var(--ease), border-color var(--dur-fast) var(--ease); }
+.bf-brief button.bf-head:hover .bf-chev { border-color: var(--ink); }
+.bf-group.open .bf-chev { transform: translateY(2px) rotate(-135deg); }
+
+/* Height animates through a 0fr -> 1fr grid row; hidden content leaves the tab order via visibility. */
+.bf-panel { display: grid; grid-template-rows: 0fr; visibility: hidden;
+  transition: grid-template-rows var(--dur) var(--ease), visibility 0s linear var(--dur); }
+.bf-group.open .bf-panel { grid-template-rows: 1fr; visibility: visible; transition: grid-template-rows var(--dur) var(--ease), visibility 0s; }
+.bf-inner { min-height: 0; overflow: hidden; }
+.bf-inner > :last-child { margin-bottom: 12px; }
+
+/* ---------------------------------------------------------------- rows */
+.bf-rows { list-style: none; margin: 0; padding: 0 0 0 40px; }
+.bf-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 16px; padding: 10px 4px; }
+.bf-row + .bf-row { border-top: 1px solid var(--line); }
+.bf-row-top { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.bf-dot { flex: none; align-self: center; width: 6px; height: 6px; border-radius: 50%; background: var(--ink); }
+.bf-sender { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; }
+.bf-n { font: 12px/1 var(--mono); color: var(--faint); }
+.bf-wait { font: 11px/16px var(--mono); color: var(--warn); white-space: nowrap; }
+.bf-date { flex: none; margin-left: auto; font: 12px/1 var(--mono); color: var(--faint); white-space: nowrap; }
+.bf-subj, .bf-snip { grid-column: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bf-subj { font-size: 14px; color: var(--ink-2); }
+.bf-snip { font-size: 13px; color: var(--muted); }
+.bf-acts { grid-column: 2; grid-row: 2 / span 2; align-self: center; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.bf-row.dismissed > :not(.bf-acts) { opacity: .5; }
+.bf-row.dismissed .bf-subj { text-decoration: line-through; }
+
+.bf-brief button.bf-pill { min-height: 28px; padding: 3px 12px; border: 1px solid var(--line-2); border-radius: var(--r-pill); background: transparent;
+  color: var(--ink); font: 500 13px/20px var(--font); white-space: nowrap; cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease); }
+.bf-brief button.bf-pill:hover:not(:disabled) { background: var(--surface-hover); border-color: var(--line-3); }
+.bf-brief button.bf-pill.bf-quiet { border-color: transparent; color: var(--muted); }
+.bf-brief button.bf-pill.bf-quiet:hover:not(:disabled) { background: var(--surface-hover); border-color: transparent; color: var(--ink); }
+.bf-brief button:disabled { opacity: .45; cursor: default; }
+
+.bf-promo { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 2px 4px 0 44px; font-size: 14px; color: var(--ink-2); }
+.bf-empty { margin: 0; padding: 0 4px 0 44px; font-size: 14px; color: var(--muted); }
+.bf-unlisted { margin: 2px 0 0; padding-left: 44px; font: 12px/18px var(--mono); color: var(--faint); }
+.bf-brief button.bf-more { margin: 6px 0 0 44px; font-size: 13px; }
+
+@media (max-width: 560px) {
+  .bf-rows { padding-left: 0; }
+  .bf-promo, .bf-empty, .bf-unlisted { padding-left: 4px; }
+  .bf-brief button.bf-more { margin-left: 4px; }
+  .bf-acts { grid-column: 1 / -1; grid-row: auto; justify-content: flex-start; margin-top: 8px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bf-panel, .bf-group.open .bf-panel, .bf-chev, .bf-brief button.bf-pill { transition: none; }
+}

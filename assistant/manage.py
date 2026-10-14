@@ -878,6 +878,8 @@ def commit_pending(draft_id="", variant="") -> str:
                 autonomy.on_commit_result(draft, written, verified)
         try:
             if kind == "email_send":
+                # Subject and recipients on the log row let the rail's "Drafts saved" list survive a restart.
+                obs.annotate(subject=str(draft.get("subject") or "")[:120], to=", ".join(draft.get("to") or [])[:200])
                 result = _commit_email(draft, _str(variant))
             elif kind == "email_modify":
                 result = _commit_modify(draft)

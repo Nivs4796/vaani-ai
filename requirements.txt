@@ -8,3 +8,7 @@ python-dotenv==1.2.4
 uvicorn==0.54.0
 itsdangerous==2.2.0
 cryptography==50.0.2
+# Voice: speech-to-text on this Mac (no cloud). av is pinned below 19: PyAV 19 broke
+# faster-whisper 1.2.1's audio decoder.
+faster-whisper==1.2.1
+av>=18,<19

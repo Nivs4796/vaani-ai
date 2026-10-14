@@ -1,0 +1,178 @@
+/* Settings: full pages over the chat column (settings.js). A centred 620px column on the page
+   background: "back to chat", page pills, icon + title, a one-line lede, then white cards.
+   Only the contract tokens are used (.build/CONTRACT-v2.md). The Autonomy and Proof pages reuse
+   app.js's renderers; their output is restyled here, scoped to #settingsView. */
+
+/* ---------------------------------------------------------------- frame */
+/* While open, the view replaces everything in .center except the top bar (the mobile menu button lives there). */
+.app .center.sv-open { display: flex; flex-direction: column; }
+.center.sv-open > :not(#settingsView):not(.topbar) { display: none !important; }
+#settingsView[hidden] { display: none !important; }
+#settingsView { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; background: var(--bg); color: var(--ink); font-family: var(--font); }
+.sv-col { box-sizing: border-box; width: 100%; max-width: 620px; margin: 0 auto; padding: 28px 16px 72px; }
+@media (min-width: 900px) { .sv-col { padding-top: 40px; } }
+@media (prefers-reduced-motion: no-preference) {
+  #settingsView:not([hidden]) .sv-col { animation: sv-in var(--dur) var(--ease); }
+}
+@keyframes sv-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+#settingsView :focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+.sv-back { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 4px 10px 4px 6px; margin-left: -6px;
+  border: 0; border-radius: var(--r-pill); background: transparent; color: var(--muted); font: 500 14px/20px var(--font); cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease); }
+.sv-back span { font-size: 20px; line-height: 1; margin-top: -2px; }
+.sv-back:hover { background: var(--surface-hover); color: var(--ink); }
+
+/* Page switcher: pills that wrap (never a horizontal scroll). */
+.sv-nav { display: flex; flex-wrap: wrap; gap: 6px; margin: 16px 0 0; }
+.sv-pill { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 4px 12px 4px 10px; border: 1px solid var(--line-2);
+  border-radius: var(--r-pill); color: var(--ink-2); font: 500 13px/20px var(--font); text-decoration: none; background: transparent;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease); }
+.sv-pill svg { width: 16px; height: 16px; flex: none; }
+.sv-pill:hover { background: var(--surface-hover); color: var(--ink); }
+.sv-pill[aria-current="page"] { background: var(--ink); border-color: var(--ink); color: var(--bg); }
+
+.sv-head { display: flex; align-items: center; gap: 12px; margin: 28px 0 6px; }
+.sv-icon { flex: none; display: inline-grid; place-items: center; width: 40px; height: 40px; border-radius: var(--r-md);
+  background: var(--surface); border: 1px solid var(--line); color: var(--ink); }
+.sv-icon svg { width: 20px; height: 20px; }
+.sv-glyph { font-size: 18px; line-height: 1; }
+.sv-head h1 { margin: 0; font: 600 24px/1.25 var(--font); letter-spacing: -.01em; color: var(--ink); overflow-wrap: anywhere; }
+.sv-head h1:focus { outline: none; }
+.sv-lede { margin: 0 0 24px; font-size: 15px; line-height: 1.5; color: var(--muted); }
+.sv-body, .sv-page { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+/* ---------------------------------------------------------------- shared pieces */
+.sv-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: 18px 20px; min-width: 0; }
+.sv-card-title { margin: 0 0 6px; font: 600 15px/1.4 var(--font); color: var(--ink); }
+.sv-rows { margin: 0; }
+.sv-row { display: grid; grid-template-columns: minmax(120px, 34%) minmax(0, 1fr); gap: 4px 16px; padding: 12px 0; border-top: 1px solid var(--line); }
+.sv-row:first-child { border-top: 0; }
+.sv-row dt { color: var(--muted); font-size: 14px; }
+.sv-row dd { margin: 0; min-width: 0; font-size: 14px; color: var(--ink); overflow-wrap: anywhere; }
+.sv-val { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 0 4px; }
+.sv-sub { color: var(--muted); font-size: 13px; }
+.sv-clock { font-family: var(--mono); font-size: 13px; color: var(--ink-2); }
+.sv-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.sv-tag { display: inline-flex; align-items: center; padding: 2px 10px; border-radius: var(--r-pill); background: var(--bg-sunken); color: var(--ink-2); font-size: 13px; line-height: 20px; }
+.sv-tag.warn { background: var(--warn-soft); color: var(--warn); margin-left: 6px; }
+.sv-note { margin: 8px 0 0; font-size: 13px; color: var(--muted); }
+.sv-note.warn { padding: 8px 12px; border-radius: var(--r-md); background: var(--warn-soft); color: var(--warn); }
+.sv-label { font-size: 14px; font-weight: 500; color: var(--ink); }
+.sv-line { display: flex; align-items: center; justify-content: space-between; gap: 12px 16px; flex-wrap: wrap; padding-top: 6px; }
+
+.sv-btn { display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 6px 16px; border: 1px solid var(--line-2);
+  border-radius: var(--r-pill); background: var(--surface); color: var(--ink); font: 500 14px/20px var(--font); cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease); }
+.sv-btn:hover:not(:disabled) { background: var(--surface-hover); border-color: var(--line-3); }
+.sv-btn:disabled { opacity: .55; cursor: default; }
+
+/* Two-option segmented control (theme). Same look as the autonomy levels below. */
+.sv-seg { display: inline-grid; grid-auto-flow: column; grid-auto-columns: minmax(84px, 1fr); gap: 2px; padding: 3px; border-radius: var(--r-pill); background: var(--bg-sunken); }
+.sv-seg button { min-height: 32px; padding: 4px 14px; border: 0; border-radius: var(--r-pill); background: transparent; color: var(--ink-2);
+  font: 500 13px/20px var(--font); cursor: pointer; transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease); }
+.sv-seg button:hover:not([aria-pressed="true"]) { background: var(--surface-hover); }
+.sv-seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); font-weight: 600; }
+
+/* ---------------------------------------------------------------- account */
+.sv-profile { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.sv-avatar { position: relative; flex: none; display: grid; place-items: center; width: 48px; height: 48px; border-radius: 50%; overflow: hidden;
+  background: var(--bg-sunken); color: var(--ink); font-weight: 600; font-size: 18px; }
+.sv-avatar img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.sv-who { flex: 1 1 160px; min-width: 0; }
+.sv-name { font-size: 16px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+.sv-email { font-size: 14px; color: var(--muted); overflow-wrap: anywhere; }
+.sv-details .sv-row dd { font-family: var(--mono); font-size: 13px; color: var(--ink-2); }
+
+/* ---------------------------------------------------------------- autonomy (app.js wfRow output) */
+#settingsView .sv-autonomy > .lede, #settingsView .sv-proof > .lede { display: none; }  /* the page lede replaces it */
+#settingsView .notice { margin: 0; padding: 10px 14px; border-radius: var(--r-md); background: var(--warn-soft); color: var(--warn); font-size: 14px; }
+#settingsView .wf-list { display: flex; flex-direction: column; gap: 12px; }
+#settingsView .wf-list > .lede, #settingsView .sv-proof .lede { margin: 0; font-size: 14px; color: var(--muted); }
+#settingsView .wf { display: flex; flex-direction: column; gap: 10px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: 18px 20px; }
+#settingsView .wf-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#settingsView .wf-head h3 { margin: 0; font: 600 16px/1.4 var(--font); color: var(--ink); }
+#settingsView .wf-head .chip { font: 500 12px/20px var(--mono); padding: 0 10px; border-radius: var(--r-pill); border: 0; background: var(--bg-sunken); color: var(--ink-2); }
+#settingsView .wf-head .chip.lv-auto { background: var(--ok-soft); color: var(--ok); }
+#settingsView .wf-head .chip.lv-off { color: var(--muted); }
+#settingsView .wf-desc { margin: 0; font-size: 14px; color: var(--muted); }
+#settingsView .level-desc { margin: 0; font-size: 14px; color: var(--ink-2); }
+
+#settingsView .seg { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px; padding: 3px; border: 0; border-radius: var(--r-pill); background: var(--bg-sunken); }
+#settingsView .seg button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-height: 34px; padding: 4px 6px; border: 0;
+  border-radius: var(--r-pill); background: transparent; color: var(--ink-2); font: 500 13px/20px var(--font); white-space: nowrap; box-shadow: none;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease); }
+#settingsView .seg button:hover:not(:disabled):not([aria-pressed="true"]) { background: var(--surface-hover); color: var(--ink); }
+#settingsView .seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); font-weight: 600; }
+#settingsView .seg button[aria-disabled="true"] { color: var(--muted); }
+#settingsView .seg button:disabled { opacity: .45; cursor: default; }
+#settingsView .seg .lock { font-size: 11px; line-height: 1; }
+
+#settingsView .meter-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font: 12px/18px var(--mono); color: var(--muted); }
+#settingsView .meter { display: flex; gap: 3px; }
+#settingsView .meter span { width: 16px; height: 6px; border-radius: var(--r-pill); background: var(--line-2); }
+#settingsView .meter span.fill { background: var(--ink); }
+#settingsView .wf .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0; }
+#settingsView .offer-due { margin-right: auto; font: 600 13px/20px var(--font); color: var(--ink); }
+#settingsView .wf .actions button, #settingsView .proof-tools button { border-radius: var(--r-pill); }
+#settingsView .wf .actions button.primary { background: var(--ink); border-color: var(--ink); color: var(--bg); }
+
+/* The send-unlock switch: its own row under a hairline, label left and track right. */
+#settingsView .wf .switch { display: flex; flex-direction: row-reverse; align-items: center; justify-content: space-between; gap: 12px; align-self: stretch;
+  width: 100%; min-height: 0; margin-top: 4px; padding: 12px 0 0; border: 0; border-top: 1px solid var(--line); border-radius: 0;
+  background: none; color: var(--ink); font: 14px/20px var(--font); text-align: left; cursor: pointer; }
+#settingsView .wf .switch:hover { background: none; }
+#settingsView .switch .knob { position: relative; flex: none; width: 36px; height: 20px; border-radius: var(--r-pill); background: var(--line-3); transition: background var(--dur-fast) var(--ease); }
+#settingsView .switch .knob::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--surface); transition: transform var(--dur-fast) var(--ease); }
+#settingsView .switch[aria-checked="true"] .knob { background: var(--ink); }
+#settingsView .switch[aria-checked="true"] .knob::after { transform: translateX(16px); }
+#settingsView .inline-err { margin: 0; font-size: 13px; color: var(--risk); }
+#settingsView .inline-err:empty { display: none; }
+#settingsView .empty { margin: 0; padding: 18px 20px; border: 1px dashed var(--line-2); border-radius: var(--r-lg); font-size: 14px; color: var(--muted); }
+
+/* ---------------------------------------------------------------- proof (app.js showProof output) */
+#settingsView .proof-tools { display: flex; align-items: center; gap: 8px; }
+#settingsView .proof-tools select { flex: 0 1 240px; min-width: 0; min-height: 36px; padding: 6px 14px; border: 1px solid var(--line-2); border-radius: var(--r-pill);
+  background: var(--surface); color: var(--ink); font: 14px/20px var(--font); }
+#settingsView .evals { margin: 0 0 12px; padding: 14px 18px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); }
+#settingsView .evals.ok .evals-head strong { color: var(--ok); }
+#settingsView .evals.warn { background: var(--warn-soft); border-color: transparent; }
+#settingsView .evals.warn .evals-head strong { color: var(--warn); }
+#settingsView .evals p { margin: 2px 0; font-size: 14px; }
+#settingsView .evals .note { font: 12px/18px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+#settingsView .streaks { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+#settingsView .streaks .chip { padding: 2px 10px; border: 1px solid var(--line); border-radius: var(--r-pill); background: var(--surface); color: var(--ink-2); font: 12px/18px var(--mono); }
+#settingsView .streaks .chip.ok { background: var(--ok-soft); border-color: transparent; color: var(--ok); }
+#settingsView .proof-list { list-style: none; margin: 0; padding: 2px 20px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); }
+#settingsView .proof-row { display: grid; grid-template-columns: auto minmax(0, 1fr) 16px auto; gap: 12px; align-items: baseline; padding: 12px 0; border-top: 1px solid var(--line); font-size: 14px; }
+#settingsView .proof-row:first-child { border-top: 0; }
+#settingsView .proof-row time, #settingsView .proof-row .ms { font: 12px/18px var(--mono); color: var(--muted); white-space: nowrap; }
+#settingsView .proof-row .what { display: flex; flex-direction: column; min-width: 0; color: var(--ink); }
+#settingsView .outcome { font-size: 13px; }
+#settingsView .outcome.ok { color: var(--ok); }
+#settingsView .outcome.warn { color: var(--warn); }
+#settingsView .outcome.risk { color: var(--risk); }
+#settingsView .outcome.accent { color: var(--ink); font-weight: 600; }
+#settingsView .outcome.muted { color: var(--muted); }
+#settingsView .tick { font: 12px/18px var(--mono); }
+#settingsView .tick.ok { color: var(--ok); }
+#settingsView .tick.warn { color: var(--warn); }
+#settingsView .tick.muted { color: var(--faint); }
+
+/* ---------------------------------------------------------------- small screens */
+@media (max-width: 560px) {
+  .sv-col { padding: 16px 16px 56px; }
+  .sv-head { margin-top: 20px; }
+  .sv-card, #settingsView .wf { padding: 16px; }
+  #settingsView .proof-list { padding: 2px 16px; }
+  .sv-row { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .sv-line .sv-seg { width: 100%; }
+  #settingsView .proof-row { grid-template-columns: minmax(0, 1fr) 16px auto; gap: 4px 10px; }
+  #settingsView .proof-row time { grid-column: 1 / -1; }
+  #settingsView .proof-tools select { flex: 1 1 auto; }
+  #settingsView .seg button { font-size: 12px; padding: 4px 2px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #settingsView *, #settingsView *::after { transition: none !important; animation: none !important; }
+}
