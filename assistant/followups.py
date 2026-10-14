@@ -222,7 +222,7 @@ def candidates(user_id: str | None = None, wait_days=None, limit=5) -> list[dict
         if not own:
             return []
         gmail = _gmail(uid)
-        q = f"in:sent newer_than:{LOOKBACK_DAYS}d older_than:{wait}d"
+        q = context.gmail_scope(f"in:sent newer_than:{LOOKBACK_DAYS}d older_than:{wait}d")
         listing = gmail.users().messages().list(userId="me", q=q, maxResults=SENT_MAX).execute(num_retries=2)
         tids: list[str] = []
         for m in listing.get("messages") or []:

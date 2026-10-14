@@ -171,26 +171,42 @@ function spinner(verb) {
   return s;
 }
 
+// The dark "Putting together your brief" banner shown while /new or /brief builds the brief.
+function briefBanner() {
+  const s = h("div", {class: "brief-banner", role: "status"},
+    h("span", {text: "Putting together your brief"}),
+    h("span", {class: "dots", "aria-hidden": "true"}, h("i"), h("i"), h("i")));
+  s._stop = () => s.remove();
+  return s;
+}
+
 // One round trip that renders a TurnResult. opts: draft (the card being acted on), verb,
 // fallback {path, payload} for a route an older server lacks, after(r), onFail(e).
 async function turn(path, payload, label, opts = {}) {
   if (busy || !sessionId) return null;
   setBusy(true);
+  const via = opts.via || (payload && payload.via) || "typed";
   if (label) add(h("div", {class: "msg user"}, label));
   const spin = add(spinner(opts.verb || "thinking"));
+  window.Vaani.emit("turn:start", {path, payload, label, via});
   scrollDown();
   try {
     let r;
-    try { r = await api(path, Object.assign({session_id: sessionId}, payload)); }
-    catch (e) {
+    const body = Object.assign({session_id: sessionId}, payload);
+    try {
+      // Live steps: stream.js answers with the same dict POST /chat returns (and falls back to it).
+      r = path === "/chat" && window.Vaani.streamTurn ? await window.Vaani.streamTurn(body, {spin}) : await api(path, body);
+    } catch (e) {
       if (!(opts.fallback && missingRoute(e))) throw e;
       r = await api(opts.fallback.path, Object.assign({session_id: sessionId}, opts.fallback.payload));
     }
     spin._stop();
     renderTurn(r, opts);
+    window.Vaani.emit("turn:result", {r, path, payload, via});
     return r;
   } catch (e) {
     spin._stop();
+    window.Vaani.emit("turn:error", {error: e, path, payload, via});
     add(h("div", {class: "msg bot err"}, `Request failed: ${e.message}`));
     if (opts.onFail) opts.onFail(e);
     if (/unknown session/i.test(e.message)) { setBusy(false); await newChat(); }
@@ -374,6 +390,7 @@ function offerCard(o) {
 async function promote(workflow, action) {
   const row = await api(`/promotion/${encodeURIComponent(workflow)}`, {action});
   if (drawerKind === "autonomy") showAutonomy();
+  window.Vaani.emit("autonomy:changed", {workflow, action, row});  // the Settings page redraws its ladder
   return row;
 }
 
@@ -483,7 +500,7 @@ function briefEl(b) {
 async function refreshBrief(c, button) {
   if (button) button.disabled = true;
   c._stamp.textContent = "Refreshing from Gmail… ";
-  try { fillBrief(c, await api("/brief?refresh=1")); }
+  try { fillBrief(c, await api(`/brief?refresh=1${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`)); }
   catch (e) { updateStamp(c); c.querySelector(".brief-head").after(h("p", {class: "err-line", text: `Refresh failed: ${e.message}`})); if (button) button.disabled = false; }
 }
 
@@ -493,22 +510,28 @@ let briefRoute = true;
 async function showBrief() {
   closeOverlays();
   if (briefCard && briefCard.isConnected) {
-    briefCard.scrollIntoView({block: "start", behavior: "smooth"});
+    // BRIEF's card says when it is stale and refreshes itself; the classic card is refreshed from here.
+    if (briefCard.isStale && briefCard.isStale()) briefCard.refresh();
+    else if (briefCard._stamp && (briefAge(briefCard._brief) || 0) >= 30) refreshBrief(briefCard);
+    briefCard.scrollIntoView({block: "start", behavior: reducedMotion() ? "auto" : "smooth"});
     briefCard.focus({preventScroll: true});
-    if ((briefAge(briefCard._brief) || 0) >= 30) refreshBrief(briefCard);
     return;
   }
   const classic = () => turn("/chat", {text: "Check my latest emails and give me updates"}, "Check my latest emails and give me updates");
   if (!briefRoute || busy || !sessionId) return briefRoute ? null : classic();
   const b = $("#briefBtn"); b.disabled = true; b.setAttribute("aria-busy", "true");
-  const spin = spinner("building your brief");
+  const spin = briefBanner();
   const head = log.querySelector(":scope > .meta");  // pinned first, under the "New chat" stamp
   if (head) head.after(spin); else log.prepend(spin);
+  log.querySelectorAll(":scope > .hello").forEach(x => x.remove());
   try {
-    briefCard = briefEl(await api("/brief"));
+    // session_id keeps the rows' Reply / Archive matched to what is on screen.
+    const brief = await api(`/brief?session_id=${encodeURIComponent(sessionId)}`);
+    briefCard = (window.Vaani.renderBrief || briefEl)(brief);
     spin.replaceWith(briefCard);
     briefCard.scrollIntoView({block: "start"});
-    briefCard.focus({preventScroll: true});
+    if (briefCard.focus) briefCard.focus({preventScroll: true});
+    window.Vaani.emit("brief:shown", {brief, el: briefCard});
   } catch (e) {
     spin._stop();
     if (missingRoute(e)) { briefRoute = false; return classic(); }
@@ -534,7 +557,6 @@ function openDrawer(kind, title, trigger) {
   body.textContent = "";
   drawer.hidden = false;
   app.classList.add("with-drawer");
-  document.querySelectorAll(".rail-btn[data-panel]").forEach(b => b.setAttribute("aria-expanded", String(b.dataset.panel === kind)));
   closeRail();
   syncScrim();
   $("#drawerTitle").focus();
@@ -546,7 +568,6 @@ function closeDrawer() {
   drawer.hidden = true;
   app.classList.remove("with-drawer");
   drawerKind = null;
-  document.querySelectorAll(".rail-btn[data-panel]").forEach(b => b.setAttribute("aria-expanded", "false"));
   syncScrim();
   const t = drawerTrigger; drawerTrigger = null;
   if (t && t.isConnected && t.offsetParent !== null && !narrow(899)) t.focus(); else box.focus();
@@ -556,11 +577,6 @@ function openRail() { app.classList.add("rail-open"); $("#menuBtn").setAttribute
 function closeRail() { if (!app.classList.contains("rail-open")) return; app.classList.remove("rail-open"); $("#menuBtn").setAttribute("aria-expanded", "false"); syncScrim(); }
 // Overlays only: a docked drawer on a wide screen stays open while the chat works.
 function closeOverlays() { closeRail(); if (narrow(1099)) closeDrawer(); }
-
-function togglePanel(kind, title, fill, trigger) {
-  if (drawerKind === kind) { closeDrawer(); return; }
-  fill(openDrawer(kind, title, trigger));
-}
 
 function loading(parent) { return parent.appendChild(h("p", {class: "lede", text: "Loading…"})); }
 
@@ -581,29 +597,23 @@ function showEmail(row) {
   if (row.thread_id) body.append(h("p", {class: "note"}, h("a", {href: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(row.thread_id)}`, target: "_blank", rel: "noopener"}, "Open in Gmail")));
 }
 
-// ---- follow-ups
-let followRoute = false;
-function setFollowCount(rows) {
-  const b = $("#followBtn"), n = rows ? rows.length : 0;
-  b.hidden = !rows;
-  $("#followCount").textContent = n ? String(n) : "";
-  $("#followCount").hidden = !n;
-  b.setAttribute("aria-label", `Follow-ups, ${plural(n, "thread")} waiting`);
-}
+// ---- follow-ups (the count lives in RAIL's side-menu section; this refreshes it and any open list)
+let followRoute = true;
 async function refreshFollowupCount() {
-  if (!followRoute) return;
-  try { const j = await api("/followups"); setFollowCount(j.rows || []); if (drawerKind === "followups") fillFollowups(j.rows || []); }
-  catch (e) { if (missingRoute(e)) { followRoute = false; setFollowCount(null); } }
+  refreshRail();
+  if (!followRoute || !$("#followList")) return;
+  try { const j = await api("/followups"); fillFollowups(j.rows || []); }
+  catch (e) { if (missingRoute(e)) followRoute = false; }
 }
 function showFollowups(body) {
   body.append(h("p", {class: "lede", text: "Threads where you wrote last and nobody has answered yet."}));
-  body.append(h("div", {id: "followList"}));
-  loading($("#followList"));
-  api("/followups").then(j => { setFollowCount(j.rows || []); fillFollowups(j.rows || []); })
+  const list = body.appendChild(h("div", {id: "followList"}));
+  loading(list);
+  api("/followups").then(j => fillFollowups(j.rows || [], list))
     .catch(e => { const l = $("#followList"); if (l) { l.textContent = ""; l.append(h("p", {class: "inline-err", role: "alert", text: e.message})); } });
 }
-function fillFollowups(rows) {
-  const list = $("#followList");
+function fillFollowups(rows, list) {
+  list = list || $("#followList");
   if (!list) return;
   list.textContent = "";
   if (!rows.length) { list.append(h("p", {class: "empty", text: "Nothing waiting. Every thread you started has an answer."})); return; }
@@ -836,10 +846,35 @@ function updateStrip(r) {
   parts.forEach((p, i) => { if (i) strip.append(h("span", {class: "sep", "aria-hidden": "true"}, " · ")); strip.append(p); });
 }
 
-function starter() {
-  const tries = ["Check my latest emails and give me updates", "What's on my calendar today?", "Find a free hour tomorrow afternoon"];
-  add(h("div", {class: "starter", "aria-label": "Suggestions"},
-    tries.map(t => btn(t, () => turn("/chat", {text: t}, t), "chip-btn", {"data-turn": true}))));
+// Composer chips: four of these, a different four on each new chat.
+const CHIPS = ["What's on my calendar today?", "Who's waiting on a reply from me?", "Find a free hour tomorrow afternoon",
+  "Summarise my unread emails", "Draft a reply to my last email"];
+let chipRound = Math.floor(Math.random() * CHIPS.length);
+function renderChips() {
+  const wrap = $("#composerChips");
+  if (!wrap) return;
+  chipRound = (chipRound + 1) % CHIPS.length;
+  wrap.textContent = "";
+  for (let i = 0; i < 4; i++) {
+    const t = CHIPS[(chipRound + i) % CHIPS.length];
+    wrap.append(btn(t, () => { if (!busy) window.Vaani.submit(t, {via: "chip"}); }, "chip-pill", {"data-turn": true, disabled: busy}));
+  }
+}
+
+// An empty chat without a brief opens with a short greeting instead of a blank page.
+function hello() {
+  const u = (me && me.user) || {};
+  const first = String(u.name || "").trim().split(/\s+/)[0];
+  const hr = new Date().getHours();
+  const greet = hr < 12 ? "Good morning" : hr < 17 ? "Good afternoon" : "Good evening";
+  add(h("div", {class: "hello"},
+    h("h1", {text: `${greet}${first ? `, ${first}` : ""}.`}),
+    h("p", {text: "Ask about your inbox or your calendar, or pick a suggestion below."})));
+}
+
+function nowLabel() {
+  try { return new Date().toLocaleString("en-GB", Object.assign({weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"}, tzOpt())); }
+  catch (_) { return new Date().toLocaleString(); }
 }
 
 function reauthBanner() {
@@ -853,15 +888,18 @@ async function newChat() {
   log.textContent = ""; briefCard = null; sessionId = null; endEdit();
   if (drawerKind === "email") closeDrawer();
   if (me && me.reauth_required) reauthBanner();
+  renderChips();
   setBusy(true);
-  const spin = add(spinner(me && me.flags && me.flags.brief_on_open ? "building your brief" : "starting a new chat"));
+  const spin = add(me && me.flags && me.flags.brief_on_open ? briefBanner() : spinner("starting a new chat"));
   try {
     const j = await api("/new", {});
     spin._stop();
     sessionId = j.session_id;
-    add(h("div", {class: "meta"}, `New chat ${sessionId}${me && me.now ? ` · ${me.now} ${me.tz || ""}` : ""}`));
-    if (j.brief) briefCard = add(briefEl(j.brief));
-    else starter();
+    add(h("div", {class: "meta", title: `Session ${sessionId}`}, `New chat · ${nowLabel()}`));
+    if (j.brief) briefCard = add(window.Vaani.renderBrief ? window.Vaani.renderBrief(j.brief) : briefEl(j.brief));
+    else hello();
+    window.Vaani.emit("chat:new", {session_id: sessionId, brief: j.brief || null});
+    if (j.brief) window.Vaani.emit("brief:shown", {brief: j.brief, el: briefCard});
   } catch (e) {
     spin._stop();
     add(h("div", {class: "msg bot err"}, `Could not start a chat: ${e.message}`));
@@ -889,33 +927,282 @@ function renderMe() {
   if (me.flags && me.flags.theme) document.body.classList.add(`theme-${me.flags.theme}`);
 }
 
-async function probeFeatures() {
-  const flags = me && me.flags;
-  const probe = p => api(p).then(j => j, () => null);
-  const [a, p, f] = await Promise.all([probe("/autonomy"), probe("/proof?limit=1"),
-    flags && flags.followups === false ? null : probe("/followups")]);
-  $("#autonomyBtn").hidden = !a;
-  $("#proofBtn").hidden = !p;
-  followRoute = !!f;
-  setFollowCount(f ? f.rows || [] : null);
+// ---------------------------------------------------------------- shell: storage, toast, splash, theme
+
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (_) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (_) { /* private window: not remembered */ } },
+};
+const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// Vaani.toast(text, {tone: "ok"|"warn"|"risk", action: {label, onClick}, ms}) -> {el, close}
+function toast(text, opts = {}) {
+  const wrap = $("#toasts");
+  const ms = opts.ms == null ? 4000 : opts.ms;
+  const t = h("div", {class: "toast" + (opts.tone ? ` ${opts.tone}` : "")},
+    opts.tone ? h("span", {class: "toast-dot", "aria-hidden": "true"}) : null,
+    h("span", {class: "toast-text", text: String(text == null ? "" : text)}));
+  let timer = null;
+  const close = () => {
+    clearTimeout(timer);
+    if (!t.isConnected) return;
+    t.classList.add("out");
+    setTimeout(() => t.remove(), reducedMotion() ? 0 : 200);
+  };
+  const arm = () => { clearTimeout(timer); if (ms > 0) timer = setTimeout(close, ms); };
+  if (opts.action && opts.action.label) {
+    t.append(btn(opts.action.label, e => {
+      close();
+      try { if (opts.action.onClick) opts.action.onClick(e); } catch (err) { console.error("toast action failed", err); }
+    }, "toast-act"));
+  }
+  t.addEventListener("mouseenter", () => clearTimeout(timer));
+  t.addEventListener("mouseleave", arm);
+  wrap.append(t);
+  while (wrap.children.length > 3) wrap.firstElementChild.remove();
+  arm();
+  return {el: t, close};
 }
+
+// First-load splash: cycles its status line, goes on chat:new or after 8 s, whichever is first.
+const splash = $("#splash");
+let splashTick = null;
+function hideSplash() {
+  if (!splash || !splash.isConnected) return;
+  clearInterval(splashTick);
+  splash.classList.add("out");
+  setTimeout(() => splash.remove(), reducedMotion() ? 0 : 400);
+}
+if (splash) {
+  const steps = ["SIGNING YOU IN", "READING YOUR INBOX", "ALMOST THERE"];
+  let step = 0;
+  splashTick = setInterval(() => {
+    if (step < steps.length - 1) $("#splashStatus").textContent = steps[++step];
+    else clearInterval(splashTick);
+  }, 1600);
+  setTimeout(hideSplash, 8000);
+}
+
+const themeBtn = $("#themeToggle");
+function syncThemeBtn() {
+  const dark = document.documentElement.getAttribute("data-theme") === "dark";
+  const label = dark ? "Switch to light theme" : "Switch to dark theme";
+  themeBtn.setAttribute("aria-label", label);
+  themeBtn.title = label;
+}
+function toggleTheme() {
+  const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+  document.documentElement.setAttribute("data-theme", next);
+  store.set("vaani.theme", next);
+  syncThemeBtn();
+}
+
+// Desktop rail collapse (html.rail-collapsed; index.html applies the saved state before paint).
+function setRailCollapsed(on) {
+  document.documentElement.classList.toggle("rail-collapsed", on);
+  store.set("vaani.rail", on ? "collapsed" : "open");
+}
+const railCollapsed = () => document.documentElement.classList.contains("rail-collapsed");
+
+// ---------------------------------------------------------------- shell: rail sections (Vaani.rail.sections)
+
+const railBox = $("#railSections");
+const RAIL_OPEN_KEY = "vaani.rail.open";
+let railOpen = {};
+try { railOpen = JSON.parse(store.get(RAIL_OPEN_KEY) || "{}") || {}; } catch (_) { railOpen = {}; }
+const railEls = new Map();   // id -> {sec, el, body, count, loadedAt, seq}
+let railReady = false, railTimer = null;
+
+// Section icons by name; anything else (a short string) is shown as text, a Node as itself.
+const ICONS = {
+  calendar: "M2.5 4.5h11v9h-11z M2.5 7.5h11 M5.5 2.5v3 M10.5 2.5v3",
+  mail: "M2.5 4h11v8.5h-11z M2.5 4.5L8 9l5.5-4.5",
+  inbox: "M2.5 9.5l1.5-5.5h8l1.5 5.5v3.5h-11z M2.5 9.5h3.5l.8 1.5h2.4l.8-1.5h3.5",
+  reply: "M6.5 4L3 7.5 6.5 11 M3 7.5h6a4 4 0 0 1 4 4V13",
+  clock: "M8 2.5a5.5 5.5 0 1 0 0 11a5.5 5.5 0 1 0 0-11z M8 5v3.2l2 1.3",
+  history: "M2.8 8a5.2 5.2 0 1 0 1.6-3.8 M2.5 2.8v2.6h2.6 M8 5.2v3l2 1.2",
+  chat: "M2.5 3.5h11v7.5H6.5L3.5 13.5v-2.5h-1z",
+  draft: "M10.5 2.8l2.7 2.7-7.4 7.4-3.3.6.6-3.3z",
+  bell: "M4 11V7.5a4 4 0 0 1 8 0V11l1 1.5H3z M6.8 14h2.4",
+  star: "M8 2.2l1.8 3.7 4 .6-2.9 2.8.7 4L8 11.4l-3.6 1.9.7-4L2.2 6.5l4-.6z",
+  check: "M3 8.5l3.2 3L13 4.5",
+  send: "M2.5 8L13.5 2.5 10.5 13.5 7.5 9z M7.5 9l6-6.5",
+  flag: "M3.5 14V2.5 M3.5 3h8l-1.8 3 1.8 3h-8",
+  list: "M5.5 4.5h8 M5.5 8h8 M5.5 11.5h8 M2.5 4.5h.01 M2.5 8h.01 M2.5 11.5h.01",
+  people: "M6 7.5a2.5 2.5 0 1 0 0-5a2.5 2.5 0 1 0 0 5z M1.8 13.5a4.2 4.2 0 0 1 8.4 0 M10.5 3a2.3 2.3 0 0 1 0 4.4 M12 9.6a4 4 0 0 1 2.2 3.9",
+};
+const ICON_ALIAS = {followups: "reply", follow_ups: "reply", meetings: "calendar", event: "calendar", drafts: "draft",
+  edit: "draft", pencil: "draft", chats: "chat", email: "mail", recent: "history", time: "clock"};
+const SVG_NS = "http://www.w3.org/2000/svg";
+function svgIcon(d, size) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  for (const [k, v] of Object.entries({width: size, height: size, viewBox: "0 0 16 16", "aria-hidden": "true"})) svg.setAttribute(k, String(v));
+  const p = document.createElementNS(SVG_NS, "path");
+  for (const [k, v] of Object.entries({d, fill: "none", stroke: "currentColor", "stroke-width": "1.4", "stroke-linecap": "round", "stroke-linejoin": "round"})) p.setAttribute(k, v);
+  svg.append(p);
+  return svg;
+}
+function iconEl(icon) {
+  if (icon instanceof Node) return icon.cloneNode(true);
+  const key = String(icon || "").toLowerCase();
+  const d = ICONS[key] || ICONS[ICON_ALIAS[key]];
+  return d ? svgIcon(d, 16) : document.createTextNode(icon ? String(icon) : "");
+}
+
+function setRailCount(rec, n) {
+  const has = typeof n === "number" && isFinite(n);
+  rec.count.hidden = !has;
+  rec.count.textContent = has ? String(n) : "";
+  rec.count.classList.toggle("zero", n === 0);
+}
+
+function railOrder() {
+  for (const s of window.Vaani.rail.sections) { const r = s && railEls.get(String(s.id)); if (r) railBox.append(r.el); }
+}
+
+function railMount(sec) {
+  if (!railBox || !sec || sec.id == null || railEls.has(String(sec.id))) return null;
+  const id = String(sec.id), bodyId = `rail-sec-${id.replace(/[^\w-]/g, "_")}`;
+  const open = railOpen[id] !== undefined ? !!railOpen[id] : sec.open !== false;
+  const count = h("span", {class: "rail-count", hidden: true});
+  const head = h("button", {type: "button", class: "rail-sec-head", "aria-expanded": String(open), "aria-controls": bodyId},
+    h("span", {class: "rail-sec-icon", "aria-hidden": "true"}, iconEl(sec.icon)),
+    h("span", {class: "rail-sec-title", text: sec.title || id}), count,
+    h("span", {class: "rail-chev", "aria-hidden": "true"}, svgIcon("M5.5 6.5L8 9l2.5-2.5", 14)));
+  const body = h("div", {class: "rail-sec-body", id: bodyId, hidden: !open});
+  const el = h("section", {class: "rail-sec" + (open ? " open" : ""), "data-id": id}, head, body);
+  const rec = {sec, el, body, count, loadedAt: 0, seq: 0};
+  head.onclick = () => {
+    const now = head.getAttribute("aria-expanded") !== "true";
+    head.setAttribute("aria-expanded", String(now));
+    body.hidden = !now;
+    el.classList.toggle("open", now);
+    railOpen[id] = now;
+    store.set(RAIL_OPEN_KEY, JSON.stringify(railOpen));
+  };
+  railEls.set(id, rec);
+  railBox.append(el);
+  railOrder();
+  if (typeof sec.render === "function") {
+    try {
+      const out = sec.render(body, {setCount: n => setRailCount(rec, n), refresh: () => railLoad(rec)});
+      if (out instanceof Node && out !== body && out.parentNode !== body) body.append(out);
+    } catch (e) {
+      console.error(`Rail section ${id} failed to render`, e);
+      body.append(h("p", {class: "rail-empty err", text: "Could not show this section."}));
+    }
+  }
+  return rec;
+}
+
+// load() -> {count, items: [{title, sub, meta, onClick}], empty}. A section with render() only gets its count from load().
+async function railLoad(rec) {
+  const sec = rec.sec;
+  if (typeof sec.load !== "function") return;
+  const seq = ++rec.seq;
+  rec.loadedAt = Date.now();
+  let res;
+  try { res = await sec.load(); }
+  catch (e) {
+    if (seq !== rec.seq) return;
+    if (missingRoute(e)) { rec.el.hidden = true; return; }
+    if (typeof sec.render !== "function") { rec.body.textContent = ""; rec.body.append(h("p", {class: "rail-empty err", text: "Could not load right now."})); }
+    return;
+  }
+  if (seq !== rec.seq || !res) return;
+  rec.el.hidden = false;
+  const items = Array.isArray(res.items) ? res.items : [];
+  setRailCount(rec, res.count != null ? Number(res.count) : (Array.isArray(res.items) ? items.length : null));
+  if (typeof sec.render === "function") return;
+  rec.body.textContent = "";
+  if (!items.length) { rec.body.append(h("p", {class: "rail-empty", text: res.empty || "Nothing here yet."})); return; }
+  const ul = h("ul", {class: "rail-list"});
+  for (const it of items) {
+    const parts = [
+      h("span", {class: "ri-main"}, h("span", {class: "ri-title", text: String(it.title || "")}),
+        it.sub ? h("span", {class: "ri-sub", text: String(it.sub)}) : null),
+      it.meta != null && it.meta !== "" ? h("span", {class: "ri-meta", text: String(it.meta)}) : null];
+    const row = typeof it.onClick === "function"
+      ? h("button", {type: "button", class: "rail-item", title: it.title ? String(it.title) : null, onclick: e => {
+          if (narrow(899)) closeRail();
+          try { it.onClick(it, e); } catch (err) { console.error("rail item failed", err); }
+        }}, parts)
+      : h("div", {class: "rail-item static"}, parts);
+    ul.append(h("li", {}, row));
+  }
+  rec.body.append(ul);
+}
+
+// Reload every section's load(): at once, or debounced 1 s (chat:new, turn:result, refreshFollowupCount).
+function refreshRail(now) {
+  clearTimeout(railTimer);
+  const run = () => {
+    if (!railReady) return;
+    for (const rec of railEls.values()) if (Date.now() - rec.loadedAt > 800) railLoad(rec);
+  };
+  if (now) run(); else railTimer = setTimeout(run, 1000);
+}
+
+window.Vaani.on("ready", () => {
+  railReady = true;
+  for (const s of window.Vaani.rail.sections) railMount(s);
+  refreshRail(true);
+});
+window.Vaani.on("rail:register", s => {
+  if (!railReady) return;   // mounted on ready with the rest
+  const rec = railMount(s);
+  if (rec) railLoad(rec);
+});
+window.Vaani.on("chat:new", () => { refreshRail(); hideSplash(); });
+window.Vaani.on("turn:result", () => refreshRail());
 
 // ---------------------------------------------------------------- wiring
 
+function fitBox() {
+  box.style.height = "auto";
+  box.style.height = `${Math.min(box.scrollHeight, 220)}px`;
+}
+box.addEventListener("input", fitBox);
+box.addEventListener("keydown", e => {
+  // Enter sends, Shift+Enter is a new line; Enter that confirms an IME composition does neither.
+  if (e.key !== "Enter" || e.shiftKey || e.isComposing || e.keyCode === 229) return;
+  e.preventDefault();
+  if (form.requestSubmit) form.requestSubmit(); else send.click();
+});
 form.onsubmit = e => {
   e.preventDefault();
   const t = box.value.trim();
   if (!t) return;
-  box.value = ""; endEdit();
+  box.value = ""; fitBox(); endEdit();
   turn("/chat", {text: t}, t);
 };
+
+const jump = $("#jumpBtn");
+// Shown once the chat has a message and the view sits more than 200px above the newest one.
+const syncJump = () => {
+  jump.hidden = !log.querySelector(".msg.user") || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 200;
+};
+scroller.addEventListener("scroll", syncJump, {passive: true});
+if (window.ResizeObserver) new ResizeObserver(syncJump).observe(log);
+jump.onclick = () => { scroller.scrollTo({top: scroller.scrollHeight, behavior: reducedMotion() ? "auto" : "smooth"}); box.focus(); };
+
 $("#newBtn").onclick = () => { closeOverlays(); newChat(); };
 $("#briefBtn").onclick = () => { if (!busy) showBrief(); };
-$("#followBtn").onclick = e => togglePanel("followups", "Follow-ups", showFollowups, e.currentTarget);
-$("#autonomyBtn").onclick = e => togglePanel("autonomy", "Autonomy", showAutonomy, e.currentTarget);
-$("#proofBtn").onclick = e => togglePanel("proof", "Proof", body => showProof(body, ""), e.currentTarget);
+$("#settingsBtn").onclick = () => {
+  closeRail();
+  if (typeof window.Vaani.openSettings === "function") window.Vaani.openSettings();
+  else toast("Settings are not available yet.");
+};
+themeBtn.onclick = toggleTheme;
+syncThemeBtn();
+new MutationObserver(syncThemeBtn).observe(document.documentElement, {attributes: true, attributeFilter: ["data-theme"]});  // Settings flips it too
+$("#railCollapse").onclick = () => { setRailCollapsed(true); $("#menuBtn").focus(); };
 $("#drawerClose").onclick = closeDrawer;
-$("#menuBtn").onclick = () => app.classList.contains("rail-open") ? closeRail() : openRail();
+// Narrow screens: the menu button opens the off-canvas rail. Wide screens: it brings a collapsed rail back.
+$("#menuBtn").onclick = () => {
+  if (!narrow(899)) { setRailCollapsed(false); $("#newBtn").focus(); return; }
+  if (app.classList.contains("rail-open")) closeRail(); else openRail();
+};
 scrim.onclick = () => { closeRail(); closeDrawer(); };
 window.addEventListener("resize", syncScrim);
 $("#signOut").onclick = async () => {
@@ -929,6 +1216,29 @@ document.addEventListener("keydown", e => {
   else if (editing) endEdit();
 });
 
+// ---------------------------------------------------------------- hook bus (coordinator-owned)
+// Everything feature files may call. Keep these names working when refactoring app.js;
+// add new ones freely. Contract: .build/CONTRACT-v2.md.
+Object.assign(window.Vaani, {
+  h, btn, api, add, scrollDown, setBusy, turn, renderTurn, renderReply, newChat, showBrief,
+  doAction, showEmail, confirmDialog, refreshFollowupCount, shortStamp, clock, dayKey, plural, who,
+  wfName, levelName, WF, LEVELS, toast,
+  panels: {autonomy: showAutonomy, proof: showProof, followups: showFollowups},
+  // A chat turn through the normal path, exactly as if typed. via: "typed" | "voice" | "chip".
+  submit(text, opts = {}) {
+    const t = String(text || "").trim();
+    if (!t) return Promise.resolve(null);
+    const via = opts.via || "typed";
+    return turn("/chat", {text: t, via}, t, {via});
+  },
+});
+// Live values: Object.assign would copy a getter's value once, so these are defined as real getters.
+Object.defineProperties(window.Vaani, {
+  me: {get: () => me, configurable: true},
+  sessionId: {get: () => sessionId, configurable: true},
+  busy: {get: () => busy, configurable: true},
+});
+
 (async () => {
   updateStrip(null);
   try {
@@ -938,8 +1248,10 @@ document.addEventListener("keydown", e => {
   } catch (e) {
     if (e.status === 401) return;  // api() is already on its way to /login
     $("#me").textContent = `Not connected: ${e.message}`;
+    toast(`Not connected: ${e.message}`, {tone: "risk", ms: 8000});
   }
-  probeFeatures();
+  window.Vaani.emit("ready", {me});
   await newChat();
+  hideSplash();
 })();
 })();

@@ -1,0 +1,76 @@
+/* voice.css: the mic button, the voice status pill above the composer, the brief's Listen pill
+ * and the Voice settings page. Uses only the contract's tokens (.build/CONTRACT-v2.md).
+ * --level (0..1) is set by voice.js every frame: the mic level while listening, the playback
+ * level while speaking. Under prefers-reduced-motion everything stays still.
+ */
+
+/* ---- mic button: 36px circle, hairline ink outline */
+.vv-mic { position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px; min-height: 0; padding: 0; border: 1px solid var(--ink); border-radius: 50%;
+  background: transparent; color: var(--ink); cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease); }
+.vv-mic svg { display: block; width: 18px; height: 18px; }
+.vv-mic:hover { background: var(--surface-hover); }
+.vv-mic:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+/* listening: ink fill with a soft pulsing ring that also swells with the voice */
+.vv-mic.is-listening, .vv-mic.is-listening:hover { background: var(--ink); color: var(--bg); }
+.vv-mic.is-listening::after { content: ""; position: absolute; inset: -5px; border: 2px solid var(--ink); border-radius: 50%;
+  pointer-events: none; opacity: .35; transform: scale(calc(1 + var(--level, 0) * .3)); animation: vv-ring 1.6s var(--ease) infinite; }
+@keyframes vv-ring { 0%, 100% { opacity: .4; } 50% { opacity: .12; } }
+
+/* transcribing / thinking: quiet; speaking: a tap interrupts Vaani and listens */
+.vv-mic.is-busy { border-color: var(--line-3); color: var(--muted); cursor: progress; }
+.vv-mic.is-speaking { background: var(--surface-hover); }
+.vv-mic.is-warming { border-color: var(--line-3); border-style: dashed; color: var(--faint); cursor: progress;
+  animation: vv-warm 2.4s var(--ease) infinite; }
+@keyframes vv-warm { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
+.vv-mic.is-error { border-color: var(--line-2); color: var(--faint); }
+
+/* ---- status pill just above the composer (only visually hidden when idle, so it stays a live region) */
+.vv-dock { display: flex; align-items: center; gap: 10px; align-self: center; width: fit-content; max-width: calc(100% - 32px);
+  margin: 0 auto 8px; padding: 5px 14px; border-radius: var(--r-pill); background: var(--bg-sunken); color: var(--ink);
+  font: 500 13px/1.4 var(--font); }
+.vv-dock[data-state="speaking"] { padding-right: 5px; }
+.vv-dock.is-idle { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0; overflow: hidden; clip: rect(0 0 0 0);
+  clip-path: inset(50%); white-space: nowrap; }
+.vv-dock.vv-float { position: fixed; left: 50%; bottom: 88px; transform: translateX(-50%); z-index: 20; }
+.vv-dock.vv-float.is-idle { position: absolute; }
+.vv-status { display: inline-flex; align-items: center; gap: 8px; min-height: 26px; }
+.vv-orb { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--ink);
+  transform: scale(calc(1 + var(--level, 0) * 1.1)); transition: transform 60ms linear; }
+.vv-dock[data-state="transcribing"] .vv-orb, .vv-dock[data-state="thinking"] .vv-orb { animation: vv-breathe 1.2s var(--ease) infinite; }
+.vv-dock[data-state="note"] .vv-orb { background: var(--muted); }
+@keyframes vv-breathe { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+.vv-stop { min-height: 0; height: 26px; padding: 0 12px; border: 0; border-radius: var(--r-pill); background: var(--ink); color: var(--bg);
+  font: 500 12px/26px var(--font); cursor: pointer; }
+.vv-stop:hover { opacity: .88; }
+.vv-stop:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.vv-stop[hidden] { display: none; }
+
+/* ---- the transcript bubble of a spoken request */
+.vv-said { display: inline-flex; vertical-align: -1px; margin-right: 6px; opacity: .6; }
+.vv-said svg { width: 12px; height: 12px; }
+.vv-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+
+/* ---- brief "Listen" pill */
+.vv-listen { display: inline-flex; align-items: center; gap: 6px; min-height: 0; height: 28px; padding: 0 12px;
+  border: 1px solid var(--line-3); border-radius: var(--r-pill); background: transparent; color: var(--ink);
+  font: 500 13px/1 var(--font); cursor: pointer; transition: background var(--dur-fast) var(--ease); }
+.vv-listen svg { width: 14px; height: 14px; }
+.vv-listen:hover { background: var(--surface-hover); }
+.vv-listen:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.vv-listen.is-playing, .vv-listen.is-playing:hover { background: var(--ink); border-color: var(--ink); color: var(--bg); }
+
+/* ---- Voice settings page (cards, rows and buttons come from settings.css) */
+.vv-set-voice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.vv-set-select { flex: 1 1 180px; min-width: 0; min-height: 36px; padding: 6px 10px; border: 1px solid var(--line-2);
+  border-radius: var(--r-md); background: var(--surface); color: var(--ink); font: 400 14px/20px var(--font); }
+.vv-set-select:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+.vv-set-test { gap: 6px; }
+.vv-set-test svg { width: 14px; height: 14px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .vv-mic, .vv-mic::after, .vv-orb, .vv-listen { animation: none !important; transition: none !important; }
+  .vv-mic.is-listening::after, .vv-orb { transform: none !important; }
+}

@@ -155,6 +155,12 @@ async def lifespan(app: FastAPI):
             log.error("!!! VAANI_TOKEN_KEY is not set: sign-in cannot store Google tokens. Run: python -m assistant.auth init-env !!!")
     else:
         await run_in_threadpool(_connected_email)
+    try:  # speech-to-text loads in a background thread; /voice/status reports when it is ready
+        from assistant import voice
+
+        voice.start_warmup()
+    except Exception:
+        log.exception("voice warm-up did not start")
     yield
 
 
@@ -252,6 +258,7 @@ class ChatIn(BaseModel):
     confirm_draft_id: str | None = None
     cancel_draft_id: str | None = None
     confirm_variant: str | None = None
+    via: str | None = None  # "typed" | "voice" | "chip": how the text was entered (history, voice rules)
 
 
 # --------------------------------------------------------------------------- sign-in
@@ -433,7 +440,21 @@ async def new(request: Request):
             brief = await _call_as(user, flow.open_chat, session)
         except Exception:  # the chat still opens; the page shows the old placeholder
             log.exception("brief on open failed")
-    return {"session_id": session.id, "brief": brief}
+    out = {"session_id": session.id, "brief": brief}
+    await _remember(request, session.id, "new", {}, out)
+    return out
+
+
+async def _remember(request: Request, session_id: str, kind: str, req: dict, res) -> None:
+    """Store one turn in the chat history (assistant/history.py). Never fails the request."""
+    if not isinstance(res, dict):
+        return
+    try:
+        from assistant import history
+
+        await run_in_threadpool(history.record, _uid(request), session_id, kind, req, res)
+    except Exception:
+        log.exception("history.record failed")
 
 
 def _friendly(session: agent.Session, text: str) -> dict:
@@ -458,10 +479,16 @@ async def chat(request: Request, body: ChatIn):
         try:
             user = _user(request)
             if body.cancel_draft_id is not None:  # Cancel and Skip are the same decision: logged as a skip
-                return await _call_as(user, flow.skip, entry.session, body.cancel_draft_id)
+                out = await _call_as(user, flow.skip, entry.session, body.cancel_draft_id)
+                await _remember(request, body.session_id, "cancel", {"draft_id": body.cancel_draft_id}, out)
+                return out
             if body.confirm_draft_id is not None:
-                return await _call_as(user, flow.confirm, entry.session, body.confirm_draft_id, body.confirm_variant)
-            return await _call_as(user, flow.chat, entry.session, body.text)
+                out = await _call_as(user, flow.confirm, entry.session, body.confirm_draft_id, body.confirm_variant)
+                await _remember(request, body.session_id, "confirm", {"draft_id": body.confirm_draft_id, "variant": body.confirm_variant}, out)
+                return out
+            out = await _call_as(user, flow.chat, entry.session, body.text)
+            await _remember(request, body.session_id, "chat", {"text": body.text, "via": body.via or "typed"}, out)
+            return out
         except Exception as e:  # run_turn already catches; this is the backstop, never a 500
             log.exception("run_turn crashed")
             return _friendly(entry.session, f"Something went wrong on my side ({type(e).__name__}). Nothing was changed; please try again.")
@@ -524,7 +551,10 @@ async def _in_session(request: Request, session_id: str, fn, *args):
 
 @app.post("/action")
 async def brief_action(request: Request, body: ActionIn):
-    return await _in_session(request, body.session_id, flow.action, body.action, body.message_id, body.thread_id, body.draft_id)
+    out = await _in_session(request, body.session_id, flow.action, body.action, body.message_id, body.thread_id, body.draft_id)
+    await _remember(request, body.session_id, "action", {"action": body.action, "message_id": body.message_id,
+                                                          "thread_id": body.thread_id, "draft_id": body.draft_id}, out)
+    return out
 
 
 @app.post("/skip")
@@ -624,3 +654,22 @@ async def dismiss_followup(request: Request, thread_id: str):
 async def get_proof(request: Request, workflow: str | None = None, limit: int = 20):
     return await _call_as(_user(request), flow.proof, workflow, max(1, min(int(limit), 100)))
 
+
+
+# --- look, feel and voice build: one router per feature module, each owned by one agent ---
+# (.build/CONTRACT-v2.md). Imported last so the routers can lazily reuse this module's helpers.
+from assistant import routes_history, routes_rail, routes_stream, routes_voice  # noqa: E402
+
+for _router in (routes_stream.router, routes_history.router, routes_rail.router, routes_voice.router):
+    app.include_router(_router)
+
+
+@app.middleware("http")
+async def revalidate_static(request: Request, call_next):
+    """Pages and static files are revalidated on every load (cheap 304s), so a browser never
+    runs a new page against a cached old app.js or app.css after an update."""
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/static/") or path in ("/", "/login"):
+        response.headers.setdefault("Cache-Control", "no-cache")
+    return response

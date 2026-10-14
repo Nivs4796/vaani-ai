@@ -37,6 +37,10 @@ current_origin: ContextVar[str] = ContextVar("current_origin", default="asked")
 current_confirmer: ContextVar[str] = ContextVar("current_confirmer", default="user")
 # Extra fields for the row of the @logged call in progress (see annotate()).
 _row_extra: ContextVar[dict | None] = ContextVar("_row_extra", default=None)
+# A callable that hears every @logged call start and end ({"phase": "start"|"end", "tool",
+# "ms", "ok"}). routes_stream.py sets it for one turn so the page can show live steps.
+# None (the default) means nobody is listening and nothing changes.
+step_sink: ContextVar = ContextVar("step_sink", default=None)
 
 ARGS_MAX = 300
 # A tool result that starts with one of these is a refusal/failure, never a success.
@@ -98,6 +102,16 @@ def log_decision(tool: str, **fields) -> dict:
     return row
 
 
+def _tell_sink(event: dict) -> None:
+    sink = step_sink.get()
+    if sink is None:
+        return
+    try:
+        sink(event)
+    except Exception:
+        pass  # a listener must never break a tool call
+
+
 def logged(fn):
     """Time a tool call and append one line to logs/tools.jsonl. Never raises:
     if the tool itself raises (they all catch, this is the backstop) the caller
@@ -105,6 +119,7 @@ def logged(fn):
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
+        _tell_sink({"phase": "start", "tool": fn.__name__})
         t0 = time.perf_counter()
         extra_token = _row_extra.set({})
         try:
@@ -139,6 +154,7 @@ def logged(fn):
         for key, value in extra.items():
             row.setdefault(key, value)  # the measured base fields always win
         _write_line(TOOLS_LOG, row)
+        _tell_sink({"phase": "end", "tool": fn.__name__, "ms": ms, "ok": row["ok"]})
         return result
 
     return wrapper

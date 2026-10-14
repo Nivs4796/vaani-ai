@@ -1,0 +1,33 @@
+/* stream.css: live tool steps while a chat turn runs, the collapsed step line, and the
+   word-by-word reveal of a new reply (STREAM; markup in static/stream.js). Tokens only. */
+
+.turn-steps { align-self: flex-start; max-width: 100%; color: var(--muted); font-size: 13px; line-height: 1.45; }
+.turn-steps-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.turn-step { display: flex; align-items: center; gap: 8px; min-width: 0; animation: vaani-step-in var(--dur) var(--ease) both; }
+.turn-step-label { overflow-wrap: anywhere; }
+.turn-step.running .turn-step-label { color: var(--ink-2); }
+.turn-step-mark { flex: none; width: 14px; height: 14px; display: inline-grid; place-items: center; font-size: 11px; line-height: 1; }
+.turn-step.running .turn-step-mark::before {
+  content: ""; width: 6px; height: 6px; border-radius: var(--r-pill); background: var(--faint);
+  animation: vaani-step-pulse .8s var(--ease) infinite alternate;
+}
+.turn-step.ok .turn-step-mark { color: var(--ok); }
+.turn-step.ok .turn-step-mark::before { content: "\2713"; }
+.turn-step.failed .turn-step-mark { color: var(--warn); }
+.turn-step.failed .turn-step-mark::before { content: "!"; font-weight: 600; }
+.turn-step-ms, .turn-steps-ms { font-family: var(--mono); font-size: 12px; color: var(--faint); }
+
+/* After the turn: one faint line above the reply. */
+.turn-steps.collapsed { color: var(--faint); font-size: 12.5px; }
+
+/* A new reply: words appear one after another (stream.js sets each delay; all done by 600 ms). */
+.msg.bot.revealing .sw { animation: vaani-word-in .15s var(--ease) both; }
+.msg.bot.reveal-fade { animation: vaani-word-in .4s var(--ease) both; }
+
+@keyframes vaani-step-in { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
+@keyframes vaani-step-pulse { from { opacity: .35; } to { opacity: 1; } }
+@keyframes vaani-word-in { from { opacity: 0; } to { opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .turn-step, .turn-step.running .turn-step-mark::before, .msg.bot.revealing .sw, .msg.bot.reveal-fade { animation: none; }
+}

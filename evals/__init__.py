@@ -15,7 +15,7 @@ from pathlib import Path
 for _key, _default in {
     "VAANI_AUTH": "single", "VAANI_ALLOWED_EMAILS": "", "VAANI_AUTONOMY": "0", "VAANI_AUTO_ALLOWED": "triage",
     "VAANI_PROMOTION": "0", "VAANI_PROMOTION_N": "5", "VAANI_BRIEF_ON_OPEN": "0", "VAANI_BRIEF_TTL_MIN": "10",
-    "VAANI_BRIEF_DAYS": "", "VAANI_FOLLOWUPS": "0", "VAANI_FOLLOWUP_DAYS": "", "VAANI_THEME": "classic",
+    "VAANI_BRIEF_DAYS": "", "VAANI_FOLLOWUPS": "0", "VAANI_FOLLOWUP_DAYS": "", "VAANI_THEME": "classic", "VAANI_DEMO_LABEL": "",
 }.items():
     os.environ[_key] = _default
 
