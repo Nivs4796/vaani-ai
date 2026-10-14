@@ -33,8 +33,15 @@ current_session: ContextVar = ContextVar("current_session", default=None)
 # "followup" (a follow-up nudge). Set by the code path that makes the card.
 current_origin: ContextVar[str] = ContextVar("current_origin", default="asked")
 # Who confirmed the card being carried out: "user" (the card's button), "inline"
-# (One-tap approve on an inline card) or "policy" (Auto). Set by the web layer.
+# (One-tap approve on an inline card), "policy" (Auto), "undo" or "voice" (a spoken
+# approval in voice mode, voice_policy.py). Set by the web layer.
 current_confirmer: ContextVar[str] = ContextVar("current_confirmer", default="user")
+# "voice" while a turn runs for a session in voice mode (routes_voiceturn.py sets it): the
+# model then sees a shorter transcript (voicectx.trim). "chat" (the default) changes nothing.
+current_mode: ContextVar[str] = ContextVar("current_mode", default="chat")
+# The spoken approval being carried out ({"heard", "confidence", "tid"}) when current_confirmer
+# is "voice"; commit_pending copies heard / confidence onto its decision row for Proof.
+current_voice: ContextVar = ContextVar("current_voice", default=None)
 # Extra fields for the row of the @logged call in progress (see annotate()).
 _row_extra: ContextVar[dict | None] = ContextVar("_row_extra", default=None)
 # A callable that hears every @logged call start and end ({"phase": "start"|"end", "tool",

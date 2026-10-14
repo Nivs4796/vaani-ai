@@ -60,6 +60,8 @@ function shortStamp(iso) {
   catch (_) { return d.toLocaleString(); }
 }
 const plural = (n, one, many) => `${n} ${n === 1 ? one : (many || one + "s")}`;
+// Voice mode (html.mode-voice, mode.js): the chat UI is hidden, so it must not take focus or keys.
+const voiceMode = () => document.documentElement.classList.contains("mode-voice");
 
 // "Ravi Kumar <ravi@x.com>" -> "Ravi"; a bare address stays as it is.
 function who(addr) {
@@ -166,7 +168,7 @@ function renderReply(target, text) {
 function setBusy(b) {
   busy = b; box.disabled = b; send.disabled = b; $("#newBtn").disabled = b;
   document.querySelectorAll(".card.live button, [data-turn]").forEach(x => { if (!x.hasAttribute("data-off")) x.disabled = b; });
-  if (!b && drawer.hidden && !app.classList.contains("rail-open")) box.focus();
+  if (!b && drawer.hidden && !app.classList.contains("rail-open") && !voiceMode()) box.focus();
 }
 
 function spinner(verb) {
@@ -202,7 +204,9 @@ async function turn(path, payload, label, opts = {}) {
     const body = Object.assign({session_id: sessionId}, payload);
     try {
       // Live steps: stream.js answers with the same dict POST /chat returns (and falls back to it).
-      r = path === "/chat" && window.Vaani.streamTurn ? await window.Vaani.streamTurn(body, {spin}) : await api(path, body);
+      // Voice mode's /voice/turn is a stream of the same shape (contract v3).
+      const streamed = (path === "/chat" || path === "/voice/turn") && window.Vaani.streamTurn;
+      r = streamed ? await window.Vaani.streamTurn(body, {spin, path}) : await api(path, body);
     } catch (e) {
       if (!(opts.fallback && missingRoute(e))) throw e;
       r = await api(opts.fallback.path, Object.assign({session_id: sessionId}, opts.fallback.payload));
@@ -577,7 +581,7 @@ function closeDrawer() {
   drawerKind = null;
   syncScrim();
   const t = drawerTrigger; drawerTrigger = null;
-  if (t && t.isConnected && t.offsetParent !== null && !narrow(899)) t.focus(); else box.focus();
+  if (t && t.isConnected && t.offsetParent !== null && !narrow(899)) t.focus(); else if (!voiceMode()) box.focus();
 }
 
 function openRail() { app.classList.add("rail-open"); $("#menuBtn").setAttribute("aria-expanded", "true"); syncScrim(); $("#newBtn").focus(); }
@@ -766,10 +770,24 @@ function ago(iso) {
   return hrs < 48 ? `${hrs} h ago` : `${Math.round(hrs / 24)} days ago`;
 }
 const KIND_NAME = {email_send: "Email", email_modify: "Mailbox change", event_create: "New event", event_update: "Event change", event_delete: "Event delete", event_rsvp: "RSVP"};
+// "Email" saved to drafts (the first of voice mode's two email steps) reads "Email draft"; unknown kinds are spelled out.
+function kindName(r) {
+  const k = r.card_kind || "";
+  if (k === "email_send" && r.variant === "save_draft") return "Email draft";
+  return KIND_NAME[k] || k.replace(/_/g, " ");
+}
+// "Approved by voice · “confirm” · 0.91": the words the Mac heard and how sure the speech model was.
+function voiceOutcome(r) {
+  const heard = String(r.heard || "").trim();
+  const conf = r.stt_conf != null && r.stt_conf !== "" && isFinite(Number(r.stt_conf)) ? Number(r.stt_conf).toFixed(2) : "";
+  const parts = ["Approved by voice", heard ? `“${heard.length > 60 ? heard.slice(0, 59) + "…" : heard}”` : "", conf];
+  return parts.filter(Boolean).join(" · ");
+}
 function outcome(r) {
   const t = r.tool || "";
   if (t === "commit_pending" || t === "create_calendar_event") {
     if (!r.ok) return {text: "Failed", tone: "risk"};
+    if (r.confirmed_by === "voice") return {text: voiceOutcome(r) + (r.edited ? " · edited" : ""), tone: r.verified ? "ok" : "warn"};
     const by = {policy: "Auto", auto: "Auto", inline: "One-tap", undo: "Undo"}[r.confirmed_by] || "Approved";
     return {text: by + (r.edited ? " · edited" : ""), tone: r.verified ? "ok" : "warn"};
   }
@@ -816,7 +834,7 @@ function showProof(body, wf) {
         : h("span", {class: "tick muted", "aria-hidden": "true"}, "–");
       ol.append(h("li", {class: "proof-row"},
         h("time", {datetime: r.ts || null}, shortStamp(r.ts)),
-        h("span", {class: "what"}, h("span", {}, [wfName(r.workflow), KIND_NAME[r.card_kind] || r.card_kind].filter(Boolean).join(" · ") || "—"),
+        h("span", {class: "what"}, h("span", {}, [wfName(r.workflow), kindName(r)].filter(Boolean).join(" · ") || "—"),
           h("span", {class: `outcome ${o.tone}`}, o.text)),
         v,
         h("span", {class: "ms"}, r.ms != null ? `${r.ms} ms` : "")));
@@ -1217,7 +1235,8 @@ $("#signOut").onclick = async () => {
   location.href = "/login";
 };
 document.addEventListener("keydown", e => {
-  if (e.key !== "Escape" || $("#confirmDlg").open) return;
+  // Voice mode: Esc belongs to the voice engine (stop / cancel a countdown), not to the hidden chat UI.
+  if (e.key !== "Escape" || voiceMode() || $("#confirmDlg").open) return;
   if (app.classList.contains("rail-open")) { closeRail(); $("#menuBtn").focus(); }
   else if (!drawer.hidden) closeDrawer();
   else if (editing) endEdit();

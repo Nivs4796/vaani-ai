@@ -1,0 +1,58 @@
+/* mode.css: Voice / Chat mode (MODE). Contract: .build/CONTRACT-v3.md.
+   html.mode-voice shows the HUD (#hud) and hides the whole chat UI, side menu included;
+   html.mode-chat hides the HUD and leaves the chat UI exactly as it is.
+   The "Chat | Voice" toggle (mode.js) sits in the chat topbar (#modeSlotChat, app tokens) and in the
+   HUD header (#modeSlotHud, HUD tokens, which hud.css defines on #hud). */
+
+/* ---------------------------------------------------------------- which UI shows */
+html.mode-voice #app,
+html.mode-voice .skip-link,
+html.mode-voice #scrim { display: none !important; }
+html.mode-chat #hud { display: none !important; }
+
+/* Voice: the HUD is one full-window layer; hud.css decides where it scrolls (inside its panes, or the
+   whole HUD on narrow screens). The page behind it never scrolls. Splash (z 100) and toasts (z 90) stay above it. */
+html.mode-voice, html.mode-voice body { overflow: hidden; overscroll-behavior: none; }
+html.mode-voice #hud { position: fixed; inset: 0; z-index: 1; overscroll-behavior: contain; }
+
+/* ---------------------------------------------------------------- the toggle (both places) */
+.mode-seg { display: inline-flex; flex: none; align-items: center; padding: 2px; border: 1px solid var(--line-2);
+  border-radius: var(--r-pill, 999px); background: var(--surface); }
+.mode-seg .mode-seg-btn { min-height: 34px; height: 34px; margin: 0; padding: 4px 18px; border: 0; border-radius: var(--r-pill, 999px);
+  background: transparent; color: var(--muted); font: 500 13px/20px var(--font); white-space: nowrap; cursor: pointer;
+  transition: background-color var(--dur-fast, .15s) var(--ease, ease), color var(--dur-fast, .15s) var(--ease, ease); }
+.mode-seg .mode-seg-btn:hover:not([aria-pressed="true"]) { background: var(--surface-hover); color: var(--ink); border-color: transparent; }
+.mode-seg .mode-seg-btn[aria-pressed="true"] { background: var(--ink); color: var(--bg); font-weight: 600; cursor: default; }
+.mode-seg .mode-seg-btn:focus-visible { outline: 2px solid var(--focus, var(--ink)); outline-offset: 2px; }
+
+/* Chat topbar: the toggle sits between the brand and the icons; the whole control is 40px tall. */
+.topbar .mode-slot { display: flex; flex: 1 1 auto; justify-content: center; min-width: 0; }
+.topbar .mode-slot:empty { display: none; }
+
+/* HUD header: exactly the mock-up (40px buttons, HUD tokens, light and dark come from #hud). */
+#modeSlotHud { display: inline-flex; min-width: 0; }
+#hud .mode-seg { border-color: var(--hud-line2); background: var(--hud-panel); }
+#hud .mode-seg .mode-seg-btn { min-height: 40px; height: 40px; padding: 4px 20px; color: var(--hud-muted); font-family: var(--font); }
+#hud .mode-seg .mode-seg-btn:hover:not([aria-pressed="true"]) { background: transparent; color: var(--hud-text); }
+#hud .mode-seg .mode-seg-btn[aria-pressed="true"] { background: var(--hud-text); color: var(--hud-bg); }
+#hud .mode-seg .mode-seg-btn:focus-visible { outline-color: var(--hud-acc, var(--hud-text)); }
+
+/* The one-line note in the chat thread when a chat comes back from Voice. */
+.thread .mode-note { margin: 0; font-size: 13px; line-height: 1.5; color: var(--muted); text-align: center; }
+
+/* ---------------------------------------------------------------- narrow screens */
+/* Phones: brand, toggle and icons stay on one row (shell.css already hides the Brief label). */
+@media (max-width: 899px) {
+  .topbar .mode-seg .mode-seg-btn { padding: 4px 13px; }
+}
+@media (max-width: 600px) {
+  #hud .mode-seg .mode-seg-btn { padding: 4px 14px; }
+}
+@media (max-width: 360px) {
+  .topbar .mode-seg .mode-seg-btn { padding: 4px 10px; }
+  #hud .mode-seg .mode-seg-btn { padding: 4px 11px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mode-seg .mode-seg-btn { transition: none !important; }
+}

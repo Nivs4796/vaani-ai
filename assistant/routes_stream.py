@@ -63,7 +63,6 @@ async def chat_stream(request: Request, raw: dict = Body(...)):
     entry = web._entry_for(request, body.session_id)
     if entry is None:
         return web._unknown_session(body.session_id)
-    user = web._user(request)
     if body.cancel_draft_id is not None:  # Cancel and Skip are the same decision: logged as a skip
         kind, req = "cancel", {"draft_id": body.cancel_draft_id}
         call = functools.partial(flow.skip, entry.session, body.cancel_draft_id)
@@ -74,6 +73,17 @@ async def chat_stream(request: Request, raw: dict = Body(...)):
         kind, req = "chat", {"text": body.text, "via": body.via or "typed"}
         call = functools.partial(flow.chat, entry.session, body.text)
 
+    return sse_turn(request, entry, body.session_id, kind, req, call)
+
+
+def sse_turn(request: Request, entry, session_id: str, kind: str, req: dict, call, setup=None) -> StreamingResponse:
+    """Run call() (a flow function returning the /chat dict) as one streamed turn: live steps,
+    then {"type": "result"}, then {"type": "done"}. Holds the session lock, records history as
+    `kind` with `req`, and never 500s. setup(), if given, runs inside the worker thread first and
+    may return a callable run afterwards (context vars for voice mode). Shared with routes_voiceturn.py."""
+    from assistant import web  # lazy: web imports this module
+
+    user = web._user(request)
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
 
@@ -82,9 +92,12 @@ async def chat_stream(request: Request, raw: dict = Body(...)):
 
     def work():
         token = obs.step_sink.set(push)
+        undo = setup() if setup else None
         try:
             return call()
         finally:
+            if callable(undo):
+                undo()
             obs.step_sink.reset(token)
 
     async def run() -> None:
@@ -92,7 +105,7 @@ async def chat_stream(request: Request, raw: dict = Body(...)):
             async with entry.lock:  # one turn at a time per session
                 try:
                     out = await web._call_as(user, work)
-                    await web._remember(request, body.session_id, kind, req, out)
+                    await web._remember(request, session_id, kind, req, out)
                 except Exception as e:  # run_turn already catches; this is the backstop, never a 500
                     log.exception("run_turn crashed")
                     out = web._friendly(entry.session, f"Something went wrong on my side ({type(e).__name__}). Nothing was changed; please try again.")

@@ -74,3 +74,6 @@
   .vv-mic, .vv-mic::after, .vv-orb, .vv-listen { animation: none !important; transition: none !important; }
   .vv-mic.is-listening::after, .vv-orb { transform: none !important; }
 }
+
+/* Voice mode (contract v3): handsfree.js owns the mic; the chat pill never floats over the HUD. */
+html.mode-voice .vv-dock.vv-float { display: none; }

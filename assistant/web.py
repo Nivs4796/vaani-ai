@@ -658,9 +658,11 @@ async def get_proof(request: Request, workflow: str | None = None, limit: int = 
 
 # --- look, feel and voice build: one router per feature module, each owned by one agent ---
 # (.build/CONTRACT-v2.md). Imported last so the routers can lazily reuse this module's helpers.
-from assistant import routes_history, routes_rail, routes_stream, routes_voice  # noqa: E402
+from assistant import routes_history, routes_rail, routes_stream, routes_voice, routes_voiceturn  # noqa: E402
 
-for _router in (routes_stream.router, routes_history.router, routes_rail.router, routes_voice.router):
+# voice-first HUD build (.build/CONTRACT-v3.md): routes_voiceturn adds /voice/mode, /voice/turn, /voice/commit ...
+for _router in (routes_stream.router, routes_history.router, routes_rail.router, routes_voice.router,
+                routes_voiceturn.router):
     app.include_router(_router)
 
 

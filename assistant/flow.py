@@ -169,9 +169,10 @@ def chat(session: agent.Session, text: str | None) -> dict:
     return apply_policy(session, agent.run_turn(session, text))
 
 
-def confirm(session: agent.Session, draft_id: str, variant: str | None = None) -> dict:
+def confirm(session: agent.Session, draft_id: str, variant: str | None = None, confirmer: str | None = None) -> dict:
+    """The card's button, or (confirmer="voice", from voice_policy.py) a spoken approval."""
     draft = session.drafts.get(str(draft_id))
-    who = "inline" if (draft or {}).get("decision") == "inline" else "user"
+    who = confirmer or ("inline" if (draft or {}).get("decision") == "inline" else "user")
     token = obs.current_confirmer.set(who)
     try:
         res = agent.run_turn(session, None, confirm_draft_id=str(draft_id), confirm_variant=variant)

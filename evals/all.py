@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 STATUS_FILE = ROOT / "data" / "eval_status.json"
 SUITES = ("test_manage", "test_guard", "test_attendees", "test_inbox", "test_auth", "test_autonomy",
           "test_promotion", "test_brief", "test_followups", "test_undo",
-          "test_stream", "test_history", "test_rail", "test_voice")
+          "test_stream", "test_history", "test_rail", "test_voice", "test_voicestate", "test_wake", "test_voice_policy", "test_voiceturn", "test_voicecmd", "test_fastpath")
 COUNT_RE = re.compile(r"(\d+)/(\d+)\b[^\n]*checks passed")
 
 
